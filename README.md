@@ -8,12 +8,17 @@ Autor: Daniel Lezcano (Yextep).
 
 Descarga `Platica.apk` desde las [releases](https://github.com/Yextep/platica/releases/latest) e instálalo. Requiere Android 7.0 o posterior. Todas las versiones se firman con la misma clave, así que cada versión nueva se instala encima de la anterior sin perder datos.
 
+La 1.1 corrige un error de la 1.0: al tocar un campo, el teclado se abría y se cerraba enseguida y no dejaba escribir. Como la 1.0 no se puede usar, la 1.1 se publicó como obligatoria: al abrir la 1.0 aparece directamente la pantalla para actualizar.
+
 Desde la 1.0, Platica avisa sola cuando hay una versión nueva: al abrirse consulta [`version.json`](version.json) y, si hay una más reciente, muestra «Platica X está disponible» con **Actualizar ahora**, **Descargar en el navegador** y **Más tarde**. «Actualizar ahora» descarga el APK de la release dentro de la app, comprueba que sea de Platica y abre el instalador de Android (la primera vez Android pide permitir que Platica instale apps). Si eliges «Más tarde», no vuelve a preguntar en tres días, pero la pestaña Más queda marcada con un punto.
 
 ## Funciones
 
 - **Gastos en segundos**: valor, categoría y listo. Categorías incluidas: Servicios, Imprevistos, Gastos personales, Deudas, Arriendo, Salud y Comida. Con «Otra» creas las tuyas (hay sugerencias como Transporte, Educación, Mascotas o Ropa). Opcionalmente: fecha, medio de pago (efectivo, débito, crédito, Nequi, Daviplata, transferencia) y una nota.
-- **Ingresos de cada mes**: al empezar indicas cuánto ganas al mes. Cada mes puedes confirmarlo con un toque o escribir lo que de verdad recibiste (varios ingresos por mes: salario, prima, honorarios…). Lo registrado siempre tiene prioridad sobre el ingreso de referencia.
+- **Ingresos de cada mes**: al empezar marcas si tienes un **salario fijo**.
+  - Con salario fijo, la app lo cuenta sola cada mes. Las primas, bonos u horas extra se agregan como ingresos extra, y un mes puntual con otro valor (por ejemplo, una incapacidad) se ajusta con «Este mes recibí otro valor».
+  - Sin salario fijo (ingresos variables), cada mes anotas lo que de verdad recibiste, en uno o varios pagos. Mientras el mes siga sin ingresos, la app lo recuerda en Inicio y con notificaciones.
+  - Cambiar de salario o de modalidad en Más → Tu perfil cuenta desde ese mes; los meses anteriores conservan lo que tenían. Si cambias a mitad de mes, la app pregunta qué hacer con lo ya anotado para no contar el salario dos veces.
 - **Inicio**: cuánto te queda, qué parte de tus ingresos ya gastaste, la línea del gasto acumulado contra tus ingresos con la proyección al cierre del mes, el gasto por categoría, la regla 50/30/20, las próximas cuotas y los últimos seis meses.
 - **Resumen mensual**: el día 1 de cada mes Platica muestra el resumen del mes anterior (y lo deja disponible siempre): ingresos, gastos, ahorro, cada categoría frente al mes anterior, los gastos más grandes, gastos hormiga y recomendaciones. Se puede compartir.
 - **Recomendaciones**: déficit, ritmo de gasto, ahorro, arriendo por encima del 30%, carga de deudas por encima del 30% o 40% de los ingresos, comida, gastos personales, imprevistos (fondo de emergencia), gastos hormiga, límites por categoría, subidas frente a meses anteriores y uso de la tarjeta de crédito.
@@ -54,8 +59,8 @@ Desinstalar la app o borrar sus datos elimina todo, así que guarda un respaldo 
 GitHub Actions compila con cada cambio en `main` ([Compilar Platica](.github/workflows/platica-apk.yml)):
 
 1. `node --test pruebas/` prueba los cálculos.
-2. `scripts/prueba_navegador.cjs` recorre la interfaz en Chromium con tamaño de celular: bienvenida, gastos, categoría propia, ingresos, movimientos, deudas, pagos, plan de pagos, puntaje, reporte, diagnóstico, simuladores, resumen mensual, recordatorios, respaldo, exportación, modo oscuro y el aviso de versión nueva (normal, pospuesto y obligatorio).
-3. Compila el APK y ejecuta `PlaticaSmokeTest` en un emulador Android 15: gasto guardado entre aperturas, aviso de versión nueva, descargas solo desde las releases, bloqueo de servidores y notificación de un recordatorio.
+2. `scripts/prueba_navegador.cjs` recorre la interfaz en Chromium con tamaño de celular: escribir con el teclado abierto (que encoge la pantalla), bienvenida con salario fijo e ingresos variables, gastos, categoría propia, ingresos, movimientos, deudas, pagos, plan de pagos, puntaje, reporte, diagnóstico, simuladores, resumen mensual, recordatorios, respaldo, exportación, modo oscuro y el aviso de versión nueva (normal, pospuesto y obligatorio).
+3. Compila el APK y ejecuta `PlaticaSmokeTest` en un emulador Android 15: tocar los campos y escribir con el teclado de Android sin que se cierre, gasto guardado entre aperturas, aviso de versión nueva, descargas solo desde las releases, bloqueo de servidores y notificación de un recordatorio.
 4. Firma `Platica.apk` y guarda el APK, los resultados y las capturas como artefactos.
 
 En un equipo con Node y Playwright:

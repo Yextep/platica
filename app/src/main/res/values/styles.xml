@@ -9,4 +9,5 @@
     </style>
     <color name="fondo">#F3F5F4</color>
     <color name="acento">#0E7A55</color>
+    <color name="icono_fondo">#0E7A55</color>
 </resources>

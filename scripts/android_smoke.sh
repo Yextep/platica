@@ -4,7 +4,7 @@ set -u
 
 ./gradlew --no-daemon connectedDebugAndroidTest
 estado=$?
-for vista in gasto inicio actualizacion; do
+for vista in gasto inicio actualizacion teclado; do
     adb pull "/sdcard/Download/platica-android-$vista.png" "docs/platica-android-$vista.png" || true
 done
 exit "$estado"

@@ -9,6 +9,8 @@ import android.os.ParcelFileDescriptor;
 import android.service.notification.StatusBarNotification;
 import android.webkit.WebView;
 
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.core.app.ApplicationProvider;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
@@ -25,6 +27,7 @@ import java.io.File;
 import java.io.InputStream;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.Assert.assertEquals;
@@ -98,11 +101,90 @@ public class PlaticaSmokeTest {
     private void configurar(ActivityScenario<MainActivity> escenario) throws Exception {
         exigir(escenario, LISTO + " && Platica.vista() === 'bienvenida'");
         evaluar(escenario, "document.querySelector('[data-accion=bienvenida-siguiente]').click()");
-        exigir(escenario, "!!document.querySelector('#b-ingreso')");
+        exigir(escenario, "!!document.querySelector('#b-salario')");
         evaluar(escenario, "document.querySelector('#b-nombre').value = 'Daniel';"
-                + "document.querySelector('#b-ingreso').value = '2000000';"
+                + "document.querySelector('#b-fijo').click();"
+                + "document.querySelector('#b-salario').value = '2000000';"
                 + "document.querySelector('#form-bienvenida').requestSubmit()");
-        exigir(escenario, "Platica.vista() === 'inicio' && Platica.estado().perfil.ingresoBase === 2000000");
+        exigir(escenario, "Platica.vista() === 'inicio' && Platica.estado().perfil.periodos[0].monto === 2000000");
+    }
+
+    // Toca un elemento de la página como lo haría un dedo: así Android abre el teclado de verdad.
+    private void tocar(ActivityScenario<MainActivity> escenario, String selector) throws Exception {
+        String valor = evaluar(escenario, "(() => { const e = document.querySelector(" + JSONObject.quote(selector) + ");"
+                + " e.scrollIntoView({block: 'center'}); const r = e.getBoundingClientRect();"
+                + " return JSON.stringify({x: r.left + r.width / 2, y: r.top + r.height / 2, d: window.devicePixelRatio}); })()");
+        JSONObject punto = new JSONObject(new JSONArray("[" + valor + "]").getString(0));
+        int[] origen = new int[2];
+        escenario.onActivity(actividad -> actividad.findViewById(R.id.navegador).getLocationOnScreen(origen));
+        long x = Math.round(origen[0] + punto.getDouble("x") * punto.getDouble("d"));
+        long y = Math.round(origen[1] + punto.getDouble("y") * punto.getDouble("d"));
+        shell("input tap " + x + " " + y);
+    }
+
+    private boolean tecladoVisible(ActivityScenario<MainActivity> escenario) {
+        AtomicBoolean visible = new AtomicBoolean(false);
+        escenario.onActivity(actividad -> {
+            WindowInsetsCompat insets = ViewCompat.getRootWindowInsets(actividad.getWindow().getDecorView());
+            visible.set(insets != null && insets.isVisible(WindowInsetsCompat.Type.ime()));
+        });
+        return visible.get();
+    }
+
+    private boolean esperarTeclado(ActivityScenario<MainActivity> escenario, int segundos) throws Exception {
+        for (int i = 0; i < segundos * 4; i++) {
+            if (tecladoVisible(escenario)) return true;
+            Thread.sleep(250);
+        }
+        return false;
+    }
+
+    // En la 1.0, al abrirse el teclado la página se redibujaba, el campo perdía el foco y el teclado se cerraba enseguida.
+    @Test
+    public void escribeConElTecladoSinQueSeCierre() throws Exception {
+        shell("settings put secure show_ime_with_hard_keyboard 1");
+        try (ActivityScenario<MainActivity> escenario = ActivityScenario.launch(MainActivity.class)) {
+            exigir(escenario, LISTO + " && Platica.vista() === 'bienvenida'");
+            evaluar(escenario, "document.querySelector('[data-accion=bienvenida-siguiente]').click()");
+            exigir(escenario, "!!document.querySelector('#b-nombre')");
+            tocar(escenario, "#b-nombre");
+            assertTrue("No se abrió el teclado", esperarTeclado(escenario, 10));
+            Thread.sleep(1500);
+            assertTrue("El teclado se cerró solo", tecladoVisible(escenario));
+            assertEquals("\"b-nombre\"", evaluar(escenario, "document.activeElement.id"));
+            shell("input text Daniel");
+            exigir(escenario, "document.querySelector('#b-nombre').value === 'Daniel'");
+            captura("teclado");
+
+            tocar(escenario, "#b-fijo");
+            exigir(escenario, "document.querySelector('#b-fijo').checked && !document.querySelector('#b-campo-salario').hidden");
+            tocar(escenario, "#b-salario");
+            exigir(escenario, "document.activeElement && document.activeElement.id === 'b-salario'");
+            assertTrue("No se abrió el teclado en el salario", esperarTeclado(escenario, 10));
+            shell("input text 2500000");
+            exigir(escenario, "document.querySelector('#b-salario').value === '$2.500.000'");
+            Thread.sleep(1000);
+            assertTrue("El teclado se cerró mientras se escribía el salario", tecladoVisible(escenario));
+            assertEquals("\"b-salario\"", evaluar(escenario, "document.activeElement.id"));
+            evaluar(escenario, "document.querySelector('#form-bienvenida').requestSubmit()");
+            exigir(escenario, "Platica.vista() === 'inicio' && Platica.estado().perfil.periodos[0].tipo === 'fijo'"
+                    + " && Platica.estado().perfil.periodos[0].monto === 2500000 && Platica.estado().perfil.nombre === 'Daniel'");
+
+            // Un gasto escrito con el teclado.
+            exigir(escenario, "!document.body.classList.contains('teclado')");
+            tocar(escenario, "#agregar");
+            exigir(escenario, "Platica.vista() === 'gasto' && !!document.querySelector('#g-monto')");
+            tocar(escenario, "#g-monto");
+            exigir(escenario, "document.activeElement && document.activeElement.id === 'g-monto'");
+            shell("input text 45000");
+            exigir(escenario, "document.querySelector('#g-monto').value === '$45.000'");
+            Thread.sleep(800);
+            assertEquals("\"g-monto\"", evaluar(escenario, "document.activeElement.id"));
+            tocar(escenario, "[data-cat=comida]");
+            exigir(escenario, "document.querySelector('[data-cat=comida]').getAttribute('aria-pressed') === 'true'");
+            tocar(escenario, "#form-gasto button[type=submit]");
+            exigir(escenario, "Platica.vista() === 'inicio' && Platica.estado().gastos.length === 1 && Platica.estado().gastos[0].monto === 45000");
+        }
     }
 
     @Test

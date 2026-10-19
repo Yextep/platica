@@ -6,9 +6,10 @@ const M = require('../app/src/main/assets/web/motor.js');
 // 19 de octubre de 2026 a mediodía, hora del teléfono.
 const AHORA = new Date(2026, 9, 19, 12, 0, 0);
 
+const SALARIO_FIJO = { nombre: 'Daniel', periodos: [{ desde: '2026-08', tipo: 'fijo', monto: 2000000 }], desde: '2026-08', configurado: true };
 function estadoCon(cambios = {}) {
   const e = M.estadoVacio();
-  e.perfil = { nombre: 'Daniel', ingresoBase: 2000000, desde: '2026-08', configurado: true };
+  e.perfil = SALARIO_FIJO;
   return M.normalizarEstado({ ...e, ...cambios });
 }
 const gasto = (id, fecha, monto, categoria, extra = {}) => ({ id, fecha, monto, categoria, nota: '', medio: '', ...extra });
@@ -41,14 +42,14 @@ test('maneja fechas y meses', () => {
 
 test('normaliza datos dañados sin perder lo válido', () => {
   const e = M.normalizarEstado({
-    perfil: { ingresoBase: '3000000', configurado: true, desde: '2026-13' },
+    perfil: { ingresoBase: '3000000', configurado: true, desde: '2026-13', periodos: [{ desde: '2026-10', tipo: 'fijo', monto: 0 }, { desde: 'x', tipo: 'fijo', monto: 5 }] },
     categorias: [{ id: 'comida', limite: 600000 }, { id: 'transporte', nombre: 'Transporte', icono: 'bus', color: 8 },
       { id: 'otra', nombre: 'Mascotas', color: 8 }, { id: 'x y', nombre: 'Mala' }],
     gastos: [gasto('a', '2026-10-01', 1000, 'comida'), gasto('b', 'ayer', 5, 'comida'), gasto('c', '2026-10-02', -4, 'comida'),
       gasto('d', '2026-10-03', 9000, 'borrada')],
     deudas: [{ id: 'd1', tipo: 'nada', saldo: 100, tasa: { valor: 2, tipo: 'MV' } }],
   });
-  assert.equal(e.perfil.ingresoBase, 3000000);
+  assert.deepEqual(e.perfil.periodos, []);
   assert.equal(e.perfil.desde, '');
   assert.equal(e.categorias.find((c) => c.id === 'comida').limite, 600000);
   assert.equal(e.categorias.length, 9);
@@ -61,13 +62,57 @@ test('normaliza datos dañados sin perder lo válido', () => {
   assert.equal(e.deudas[0].reportada, true);
 });
 
-test('el ingreso del mes es el registrado o, si no hay, el ingreso mensual estimado', () => {
-  const e = estadoCon({ ingresos: [{ id: 'i1', fecha: '2026-09-30', concepto: 'Salario', monto: 2100000 },
-    { id: 'i2', fecha: '2026-09-15', concepto: 'Extra', monto: 150000 }] });
-  assert.deepEqual([M.ingresoDelMes(e, '2026-09', AHORA).total, M.ingresoDelMes(e, '2026-09', AHORA).estimado], [2250000, false]);
-  assert.deepEqual([M.ingresoDelMes(e, '2026-10', AHORA).total, M.ingresoDelMes(e, '2026-10', AHORA).estimado], [2000000, true]);
-  // Antes de empezar a usar la app no se inventan ingresos.
+test('con salario fijo cada mes cuenta el salario, sus ajustes y los extras', () => {
+  const e = estadoCon({ ingresos: [{ id: 'i1', fecha: '2026-09-30', concepto: 'Prima', monto: 1000000 },
+    { id: 'i2', fecha: '2026-10-15', concepto: 'Salario de octubre', monto: 1500000, tipo: 'salario' },
+    { id: 'i3', fecha: '2026-10-20', concepto: 'Horas extra', monto: 120000 }] });
+  const sep = M.ingresoDelMes(e, '2026-09', AHORA);
+  assert.deepEqual([sep.total, sep.fijo, sep.salario, sep.pendiente], [3000000, true, 2000000, false]);
+  // Un ingreso de tipo «salario» reemplaza el salario fijo de ese mes; los demás se suman.
+  const oct = M.ingresoDelMes(e, '2026-10', AHORA);
+  assert.deepEqual([oct.total, oct.salario, oct.extras.length, oct.ajuste.id], [1620000, 1500000, 1, 'i2']);
+  assert.equal(M.ingresoDelMes(e, '2026-08', AHORA).total, 2000000);
+  // Antes de empezar a usar la app, y en meses futuros, no se inventan ingresos.
   assert.equal(M.ingresoDelMes(e, '2026-07', AHORA).total, 0);
+  assert.equal(M.ingresoDelMes(e, '2026-11', AHORA).total, 0);
+  assert.equal(M.ingresoReferencia(e, AHORA), 2000000);
+});
+
+test('con ingresos variables cada mes se registra y, sin registro, queda pendiente', () => {
+  const e = estadoCon({
+    perfil: { ...SALARIO_FIJO, periodos: [{ desde: '2026-08', tipo: 'variable' }], ingresoAproximado: 1800000 },
+    ingresos: [{ id: 'a', fecha: '2026-08-15', concepto: 'Quincena', monto: 900000 }, { id: 'b', fecha: '2026-08-30', concepto: 'Quincena', monto: 1000000 },
+      { id: 'c', fecha: '2026-09-28', concepto: 'Ventas', monto: 2600000 }],
+  });
+  assert.deepEqual([M.ingresoDelMes(e, '2026-08', AHORA).total, M.ingresoDelMes(e, '2026-08', AHORA).pendiente], [1900000, false]);
+  const oct = M.ingresoDelMes(e, '2026-10', AHORA);
+  assert.deepEqual([oct.total, oct.fijo, oct.pendiente], [0, false, true]);
+  assert.equal(M.resumenMes(e, '2026-10', AHORA).ingresoPendiente, true);
+  // Para los simuladores se usa el promedio de los meses anteriores.
+  assert.equal(M.ingresoReferencia(e, AHORA), 2250000);
+  const nuevo = estadoCon({ perfil: { ...SALARIO_FIJO, periodos: [], ingresoAproximado: 1800000, desde: '2026-10' } });
+  assert.equal(M.ingresoReferencia(nuevo, AHORA), 1800000);
+});
+
+test('cambiar de salario o de modalidad no reescribe los meses anteriores', () => {
+  const e = estadoCon({ perfil: { ...SALARIO_FIJO, periodos: [{ desde: '2026-08', tipo: 'fijo', monto: 2000000 },
+    { desde: '2026-09', tipo: 'fijo', monto: 2300000 }, { desde: '2026-10', tipo: 'variable' }] } });
+  assert.equal(M.ingresoDelMes(e, '2026-08', AHORA).total, 2000000);
+  assert.equal(M.ingresoDelMes(e, '2026-09', AHORA).total, 2300000);
+  assert.equal(M.ingresoDelMes(e, '2026-10', AHORA).pendiente, true);
+  assert.equal(M.esFijo(e.perfil, '2026-09'), true);
+  assert.equal(M.esFijo(e.perfil, '2026-10'), false);
+  // Dos periodos en el mismo mes: queda el último.
+  assert.deepEqual(M.normalizarPeriodos([{ desde: '2026-10', tipo: 'fijo', monto: 1 }, { desde: '2026-10', tipo: 'variable' }]), [{ desde: '2026-10', tipo: 'variable', monto: 0 }]);
+});
+
+test('los datos de la 1.0 pasan al nuevo modelo de ingresos', () => {
+  const e = M.normalizarEstado({ perfil: { nombre: 'Ana', ingresoBase: 2500000, desde: '2026-10', configurado: true },
+    ingresos: [{ id: 'x', fecha: '2026-10-01', concepto: 'Ingreso del mes', monto: 2500000 }] });
+  assert.deepEqual(e.perfil.periodos, []);
+  assert.equal(e.perfil.ingresoAproximado, 2500000);
+  assert.equal(e.ingresos[0].tipo, 'ingreso');
+  assert.equal(M.ingresoDelMes(e, '2026-10', AHORA).total, 2500000);
 });
 
 test('resume el mes por categoría, con proyección y gastos hormiga', () => {
@@ -223,6 +268,16 @@ test('estima la capacidad de endeudamiento', () => {
   assert.equal(v.productos.find((p) => p.id === 'tarjeta').nivel, 'baja');
 });
 
+test('con ingresos variables recuerda anotarlos mientras el mes siga sin registro', () => {
+  const variable = { ...SALARIO_FIJO, periodos: [{ desde: '2026-08', tipo: 'variable' }] };
+  const ids = (e) => M.recordatorios(e, AHORA).map((r) => r.id);
+  const pendiente = ids(estadoCon({ perfil: variable }));
+  assert.ok(pendiente.includes('ingresos-2026-10-20') && pendiente.includes('ingresos-2026-11-03') && !pendiente.includes('ingresos-2026-10-10'));
+  const registrado = ids(estadoCon({ perfil: variable, ingresos: [{ id: 'q', fecha: '2026-10-15', concepto: 'Quincena', monto: 800000 }] }));
+  assert.ok(!registrado.includes('ingresos-2026-10-20') && registrado.includes('ingresos-2026-11-03'));
+  assert.ok(!ids(estadoCon()).some((id) => id.startsWith('ingresos-')), 'con salario fijo no hace falta recordarlo');
+});
+
 test('programa recordatorios de cuotas sin repetir las ya pagadas', () => {
   const e = estadoCon({
     deudas: [{ id: 'tc', nombre: 'Tarjeta', tipo: 'tarjeta', inicial: 1000000, saldo: 500000, cuota: 80000, diaPago: 25 }],
@@ -244,6 +299,9 @@ test('exporta un CSV seguro para Excel', () => {
   const e = estadoCon({ gastos: [gasto('a', '2026-10-01', 5000, 'comida', { nota: '=HYPERLINK("x")' }), gasto('b', '2026-10-02', 7000, 'salud', { nota: 'gafas; lentes' })] });
   const csv = M.gastosCSV(e);
   assert.ok(csv.startsWith('﻿Fecha;Tipo;Categoría'));
+  // El salario fijo se exporta en cada mes que se contó.
+  assert.match(csv, /2026-08-01;Ingreso;Salario fijo;2000000/);
+  assert.match(csv, /2026-10-01;Ingreso;Salario fijo;2000000/);
   assert.match(csv, /"'=HYPERLINK\(""x""\)"/);
   assert.match(csv, /"gafas; lentes"/);
 });

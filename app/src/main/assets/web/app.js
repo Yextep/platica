@@ -150,12 +150,22 @@
     return Math.max(240, Math.min(640, document.documentElement.clientWidth) - 58);
   }
 
+  // Campos donde se escribe. Si la pantalla se redibuja mientras uno tiene el foco, el campo se reemplaza por uno nuevo,
+  // pierde el foco y Android cierra el teclado. Por eso nada se redibuja encima de un campo activo.
+  const CAMPOS_TEXTO = 'input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=file]):not([type=button]):not([type=submit]), textarea, select';
+  function escribiendo(contenedor) {
+    const activo = document.activeElement;
+    return !!activo && activo !== document.body && activo.matches(CAMPOS_TEXTO) && (!contenedor || contenedor.contains(activo));
+  }
+
   function render(refrescar = false) {
     G.ocultarTip();
     if (nuevaVersion && nuevaVersion.obligatoria && (!vistaActual() || vistaActual().tipo !== 'version')) {
       pila = [{ tipo: 'version', clave: ++claves }];
     }
-    renderPestana();
+    // Las acciones del usuario quitan antes el foco del campo (ver el manejador de clics); lo que llega solo
+    // (la consulta de versión, volver a la app) no reemplaza la pestaña si se está escribiendo en ella.
+    if (!escribiendo($('#vista'))) renderPestana();
     renderHoja(refrescar);
     document.body.classList.toggle('con-hoja', pila.length > 0);
     document.body.classList.toggle('obligatoria', !!(nuevaVersion && nuevaVersion.obligatoria));
@@ -200,6 +210,7 @@
       return;
     }
     if (!refrescar && renderizada === v.clave && hoja.innerHTML) return;
+    if (renderizada === v.clave && escribiendo(hoja)) return;
     const desplazamiento = renderizada === v.clave ? hoja.scrollTop : 0;
     const datos = VISTAS[v.tipo](v);
     if (!datos) {
@@ -245,9 +256,15 @@
   }
 
   function atras() {
+    // Atrás en un diálogo es «Cancelar».
     if (dialogoAbierto) {
-      dialogoAbierto(false);
+      dialogoAbierto(null);
       return true;
+    }
+    // Si se estaba escribiendo, primero se guarda lo escrito y se sale del campo, para que la pantalla pueda cambiar.
+    if (escribiendo()) {
+      capturar();
+      document.activeElement.blur();
     }
     if (pila.length) {
       // Con una actualización obligatoria, atrás deja que Android cierre la app.
@@ -332,15 +349,30 @@
       <input class="entrada monto" inputmode="numeric" value="${valor != null ? esc(pesos(valor)) : ''}" aria-label="${esc(titulo)}" style="margin-top:10px">
       <div class="botones"><button type="button" class="boton" data-r="no">Cancelar</button>
       <button type="button" class="boton primario" data-r="si">Guardar</button></div></form>`, (d) => M.leerMonto($('input', d).value))
-      .then((v) => (v == null ? null : v));
+      .then((v) => (typeof v === 'number' ? v : null));
   }
 
   // Los campos de dinero muestran el valor con puntos de miles mientras se escribe.
+  // El cursor queda después del mismo dígito, así se puede corregir en medio del número.
   function formatearMonto(input) {
-    const n = M.leerMonto(input.value);
-    input.value = n ? pesos(n) : '';
+    const antes = input.value;
+    const cursor = input.selectionStart == null ? antes.length : input.selectionStart;
+    const digitos = antes.slice(0, cursor).replace(/\D/g, '').length;
+    const n = M.leerMonto(antes);
+    const nuevo = n ? pesos(n) : '';
+    if (nuevo === antes) return;
+    input.value = nuevo;
+    let pos = nuevo.startsWith('$') ? 1 : 0;
+    for (let vistos = 0; pos < nuevo.length && vistos < digitos; pos++) if (/\d/.test(nuevo[pos])) vistos++;
+    if (document.activeElement === input) {
+      try { input.setSelectionRange(pos, pos); } catch (e) { /* algunos tipos de campo no tienen cursor */ }
+    }
   }
   document.addEventListener('input', (ev) => {
+    // Mientras el teclado está componiendo una palabra no se toca el campo; se formatea al terminar.
+    if (ev.target.matches('input.monto') && !ev.isComposing) formatearMonto(ev.target);
+  });
+  document.addEventListener('compositionend', (ev) => {
     if (ev.target.matches('input.monto')) formatearMonto(ev.target);
   });
 
@@ -420,14 +452,10 @@
       html += `<div class="banner critico">${icono('alerta')}<div><strong>Tus datos guardados estaban dañados</strong><p>Si tienes un respaldo, restáuralo desde Más → Respaldo.</p></div></div>`;
     }
     html += selectorMes();
-    if (r.ingresoEstimado && (r.esActual || r.cantidad)) {
-      html += `<div class="banner">${icono('billetera')}<div><strong>¿Cuánto recibiste en ${esc(M.mesSolo(mesVista))}?</strong>
-        <p>Por ahora uso tu ingreso mensual de ${pesos(estado.perfil.ingresoBase)}. Confírmalo o escribe lo que de verdad te entró.</p>
-        <div class="botones"><button type="button" class="boton primario pequeno" data-accion="confirmar-ingreso">Recibí ${M.compacto(estado.perfil.ingresoBase)}</button>
-        <button type="button" class="boton borde pequeno" data-accion="nuevo-ingreso">Otro valor</button></div></div></div>`;
-    } else if (!r.ingresos && mesVista === actual) {
-      html += `<div class="banner">${icono('billetera')}<div><strong>Registra lo que recibiste este mes</strong><p>Así sabrás qué parte de tus ingresos se va en gastos.</p>
-        <div class="botones"><button type="button" class="boton primario pequeno" data-accion="nuevo-ingreso">Agregar ingreso</button></div></div></div>`;
+    if (r.ingresoPendiente && (r.esActual || r.cantidad)) {
+      html += `<div class="banner">${icono('billetera')}<div><strong>${r.esActual ? `¿Cuánto has recibido en ${esc(M.mesSolo(mesVista))}?` : `No registraste ingresos en ${esc(M.mesSolo(mesVista))}`}</strong>
+        <p>Tus ingresos son variables: anota lo que te entra cada mes. Si te pagan por partes (quincenas, ventas, honorarios), agrega cada pago.</p>
+        <div class="botones"><button type="button" class="boton primario pequeno" data-accion="nuevo-ingreso" data-mes="${mesVista}">${icono('suma')}Agregar ingreso</button></div></div></div>`;
     }
     const pct = r.pctGastado;
     const clase = pct == null ? '' : pct >= 1 ? 'critico' : pct >= 0.85 ? 'aviso' : '';
@@ -442,7 +470,7 @@
         <div class="medidor-texto"><span>Gastaste el ${porcentaje(pct)} de tus ingresos</span>${r.esActual ? `<span>Día ${r.dia} de ${r.dias}</span>` : ''}</div>`;
     }
     html += `<div class="cifras">
-        <button type="button" class="cifra editable" data-accion="ver-ingresos"><span>Ingresos${icono('lapiz', 'mini')}</span><strong>${cifra(r.ingresos)}</strong><small>${r.ingresoEstimado ? 'estimado' : plural(r.listaIngresos.length, 'registro', 'registros')}</small></button>
+        <button type="button" class="cifra editable" data-accion="ver-ingresos"><span>Ingresos${icono('lapiz', 'mini')}</span><strong>${cifra(r.ingresos)}</strong><small>${detalleIngresos(r)}</small></button>
         <button type="button" class="cifra" data-accion="pestana" data-p="movimientos"><span>Gastos</span><strong>${cifra(r.total)}</strong><small>${plural(r.cantidad, 'pago', 'pagos')}</small></button>
         <div class="cifra"><span>${r.esActual ? 'Proyección' : 'Por día'}</span><strong>${r.esActual ? (r.dia >= 7 && r.cantidad ? cifra(r.proyeccion) : '—') : cifra(r.total / r.dias)}</strong><small>${r.esActual ? (r.dia >= 7 ? 'al cierre del mes' : 'desde el día 7') : 'en promedio'}</small></div>
       </div></section>`;
@@ -507,9 +535,11 @@
   // ---------- pestaña Movimientos ----------
   function listaMovimientos() {
     const texto = filtro.texto.trim().toLowerCase();
+    // Un valor se busca con el mismo formato con que se muestra: «12.000» o «12000» encuentran $12.000, no $120.000.
+    const numero = /^[$\s\d.,]+$/.test(texto) && /\d/.test(texto) ? pesos(M.leerMonto(texto)).slice(1) : '';
     const gastos = estado.gastos.filter((g) => g.fecha.startsWith(mesVista)
       && (!filtro.categoria || g.categoria === filtro.categoria)
-      && (!texto || `${g.nota} ${M.categoria(estado, g.categoria).nombre} ${g.monto}`.toLowerCase().includes(texto)))
+      && (!texto || `${g.nota} ${M.categoria(estado, g.categoria).nombre}`.toLowerCase().includes(texto) || (numero && pesos(g.monto).includes(numero))))
       .sort((a, b) => b.fecha.localeCompare(a.fecha) || b.id.localeCompare(a.id));
     if (!gastos.length) {
       return `<div class="vacio">${icono('lista')}<p>${filtro.categoria || texto ? 'Nada coincide con el filtro.' : 'No hay gastos registrados en este mes.'}</p></div>`;
@@ -555,22 +585,37 @@
       $('#lista-mov', raiz).innerHTML = listaMovimientos();
     });
   }
+  function detalleIngresos(r) {
+    if (r.ingresoFijo) return r.ingresoAjustado ? 'salario ajustado' : r.extras.length ? `salario + ${plural(r.extras.length, 'extra', 'extras')}` : 'salario fijo';
+    if (r.ingresoPendiente) return 'sin registrar';
+    return plural(r.listaIngresos.length, 'registro', 'registros');
+  }
+  const filaIngreso = (i, etiqueta) => `<button type="button" class="fila" data-accion="editar-ingreso" data-id="${esc(i.id)}">
+    <span class="icono-cat chico cat-6">${icono('billetera')}</span><span class="centro"><strong>${esc(i.concepto)}</strong><small>${etiqueta ? `${etiqueta} · ` : ''}${esc(M.fechaLarga(i.fecha))}</small></span>
+    <span class="valor ingreso">+${pesos(i.monto)}</span></button>`;
   function htmlListaIngresos(mes) {
     const ing = ingresoMes(mes);
     let html = '';
-    if (ing.estimado) {
-      html += `<div class="banner">${icono('info')}<div><strong>Ingreso estimado: ${pesos(ing.total)}</strong><p>Es tu ingreso mensual. Cuando registres lo que de verdad recibiste, se usará eso.</p>
-        <div class="botones"><button type="button" class="boton primario pequeno" data-accion="confirmar-ingreso">Confirmar ${M.compacto(ing.total)}</button></div></div></div>`;
+    if (ing.fijo) {
+      // El salario fijo no se registra: se cuenta solo. Un mes puntual se puede ajustar y los extras se suman.
+      html += `<section class="tarjeta"><div class="cabecera-tarjeta"><h2>Salario</h2><span class="sub">${pesos(ing.total)} en total</span></div><div class="lista">`;
+      html += ing.ajuste ? filaIngreso(ing.ajuste, 'Salario de este mes')
+        : `<div class="fila"><span class="icono-cat chico cat-6">${icono('check')}</span><span class="centro"><strong>Salario fijo</strong><small>Se cuenta solo cada mes</small></span><span class="valor ingreso">+${pesos(ing.salario)}</span></div>`;
+      html += `</div>${ing.ajuste ? '<p class="nota">Este mes recibiste otro valor. Si lo eliminas, vuelve a contar tu salario fijo.</p>'
+        : `<button type="button" class="boton borde ancho mt" data-accion="ajustar-salario" data-mes="${mes}">Este mes recibí otro valor</button>`}</section>
+        <section class="tarjeta"><div class="cabecera-tarjeta"><h2>Ingresos extra</h2><span class="sub">primas, bonos, horas extra…</span></div>
+        ${ing.extras.length ? `<div class="lista">${ing.extras.map((i) => filaIngreso(i)).join('')}</div>` : '<p class="texto">No hay ingresos extra en este mes.</p>'}
+        <button type="button" class="boton primario ancho mt" data-accion="nuevo-ingreso" data-mes="${mes}">${icono('suma')}Agregar ingreso extra</button></section>
+        <p class="nota">Tu salario fijo es de ${pesos(ing.salarioFijo)} al mes. Si cambia, actualízalo en Más → Tu perfil: los meses anteriores conservan el valor de entonces.</p>`;
+      return html;
     }
     if (ing.lista.length) {
-      html += `<div class="lista tarjeta plana">${ing.lista.map((i) => `<button type="button" class="fila" data-accion="editar-ingreso" data-id="${esc(i.id)}">
-        <span class="icono-cat chico cat-6">${icono('billetera')}</span><span class="centro"><strong>${esc(i.concepto)}</strong><small>${esc(M.fechaLarga(i.fecha))}</small></span>
-        <span class="valor ingreso">+${pesos(i.monto)}</span></button>`).join('')}</div>`;
-    } else if (!ing.estimado) {
-      html += `<div class="vacio">${icono('billetera')}<p>No registraste ingresos en este mes.</p></div>`;
+      html += `<div class="lista tarjeta plana">${ing.lista.map((i) => filaIngreso(i)).join('')}</div>`;
+    } else {
+      html += `<div class="vacio">${icono('billetera')}<p>${ing.pendiente ? 'Todavía no registras lo que recibiste este mes.' : 'No registraste ingresos en este mes.'}</p></div>`;
     }
     html += `<button type="button" class="boton primario ancho mt" data-accion="nuevo-ingreso" data-mes="${mes}">${icono('suma')}Agregar ingreso</button>
-      <p class="nota">Tu ingreso mensual de referencia es ${pesos(estado.perfil.ingresoBase)}. Puedes cambiarlo en Más → Tu perfil.</p>`;
+      <p class="nota">Tus ingresos están como variables: cada mes anotas lo que recibes. Si ganas un salario fijo, márcalo en Más → Tu perfil y se contará solo.</p>`;
     return html;
   }
 
@@ -699,7 +744,7 @@
     }
     const fila = (accion, ic, titulo, sub, extra = '') => `<button type="button" class="ajuste" data-accion="${accion}"${extra}>${icono(ic)}<span>${titulo}${sub ? `<small>${sub}</small>` : ''}</span>${icono('adelante', 'chevron')}</button>`;
     html += `<section class="tarjeta">
-      ${fila('ver-perfil', 'billetera', 'Tu perfil e ingreso mensual', esc(`${estado.perfil.nombre ? estado.perfil.nombre + ' · ' : ''}${pesos(estado.perfil.ingresoBase)} al mes`))}
+      ${fila('ver-perfil', 'billetera', 'Tu perfil e ingresos', esc(`${estado.perfil.nombre ? estado.perfil.nombre + ' · ' : ''}${M.periodoDe(estado.perfil, M.mesActual()) ? textoPeriodo(M.periodoDe(estado.perfil, M.mesActual())) : 'Ingresos variables'}`))}
       ${fila('ver-categorias', 'etiqueta', 'Categorías y límites', `${estado.categorias.length} categorías`)}
       ${fila('ver-recordatorios', 'campana', 'Recordatorios', recordatoriosResumen())}
       ${fila('ver-usura', 'porcentaje', 'Tasa de usura', `${M.decimal(estado.ajustes.usura.ea, 2)}% E.A.`)}
@@ -714,7 +759,8 @@
   }
   function recordatoriosResumen() {
     const a = estado.ajustes;
-    const activos = [a.recordatorioCuotas && 'cuotas', a.recordatorioDiario && `diario ${a.horaDiario}`, a.resumenMensual && 'resumen'].filter(Boolean);
+    const ingresos = a.recordatorioIngresos && !M.esFijo(estado.perfil, M.mesActual());
+    const activos = [a.recordatorioCuotas && 'cuotas', a.recordatorioDiario && `diario ${a.horaDiario}`, a.resumenMensual && 'resumen', ingresos && 'ingresos'].filter(Boolean);
     return activos.length ? mayus(activos.join(', ')) : 'Apagados';
   }
 
@@ -737,38 +783,83 @@
         <button type="button" class="boton primario ancho" data-accion="bienvenida-siguiente">Empezar</button>
         <label class="boton ancho mt">${icono('guardar')}Tengo un respaldo<input type="file" accept="application/json,.json" class="oculto-visual" data-respaldo></label></div>` };
     }
+    const b = v.borrador || (v.borrador = { nombre: estado.perfil.nombre, ...ingresosActuales() });
     return { sinBarra: true, html: `<form class="bienvenida" id="form-bienvenida" autocomplete="off">${pasos}
-      <h1>Cuéntame de ti</h1><p class="texto">Con tu ingreso mensual Platica calcula cuánto te queda y te da recomendaciones. Cada mes puedes ajustar lo que de verdad recibiste.</p>
-      <label class="campo"><span>¿Cómo te llamas? (opcional)</span><input id="b-nombre" class="entrada" maxlength="40" value="${esc(v.nombre != null ? v.nombre : estado.perfil.nombre)}" autocomplete="given-name"></label>
-      <label class="campo"><span>¿Cuánto ganas o recibes al mes?</span><input id="b-ingreso" class="entrada monto" inputmode="numeric" placeholder="$0" value="${estado.perfil.ingresoBase ? esc(pesos(estado.perfil.ingresoBase)) : ''}">
-        <small>Salario, honorarios o lo que te entre normalmente. Si varía, pon un promedio.</small></label>
+      <h1>Cuéntame de ti</h1><p class="texto">Con tus ingresos Platica calcula cuánto te queda cada mes y te da recomendaciones.</p>
+      <label class="campo"><span>¿Cómo te llamas? (opcional)</span><input id="b-nombre" class="entrada" maxlength="40" value="${esc(b.nombre)}" autocomplete="given-name"></label>
+      ${camposIngreso('b', b)}
       <div id="b-error" class="error-texto" hidden></div>
       <button type="submit" class="boton primario ancho">Listo</button>
       <button type="button" class="boton ancho mt" data-accion="atras">Volver</button></form>`,
     montar: (raiz) => {
+      montarCamposIngreso(raiz, 'b');
       $('#form-bienvenida', raiz).addEventListener('submit', (ev) => {
         ev.preventDefault();
-        const ingreso = M.leerMonto($('#b-ingreso', raiz).value);
-        if (!ingreso) {
-          mostrarError($('#b-error', raiz), 'Escribe cuánto recibes al mes (puedes cambiarlo después).');
-          return;
-        }
+        const datos = leerCamposIngreso(raiz, 'b');
+        if (datos.fijo && !datos.salario) return mostrarError($('#b-error', raiz), 'Escribe cuánto ganas al mes.');
         estado.perfil.nombre = $('#b-nombre', raiz).value.trim().slice(0, 40);
-        estado.perfil.ingresoBase = ingreso;
         estado.perfil.desde = estado.perfil.desde || M.mesActual();
+        aplicarIngresos(datos);
         estado.perfil.configurado = true;
         estado.vistos.resumen = M.sumarMeses(M.mesActual(), -1);
         guardarYa();
         pila = [];
         render();
-        avisar('Listo. Toca + cada vez que pagues algo.');
+        avisar(datos.fijo ? `Listo. Tu salario de ${pesos(datos.salario)} se contará cada mes. Toca + cada vez que pagues algo.`
+          : 'Listo. Anota lo que recibas este mes y toca + cada vez que pagues algo.');
       });
     } };
   };
   CAPTURAR.bienvenida = (v, raiz) => {
-    const n = $('#b-nombre', raiz);
-    if (n) v.nombre = n.value;
+    if (!$('#b-nombre', raiz)) return;
+    v.borrador = { nombre: $('#b-nombre', raiz).value, ...leerCamposIngreso(raiz, 'b') };
   };
+
+  // Campos de ingresos de la bienvenida y del perfil: salario fijo (se cuenta solo) o ingresos variables (se anotan cada mes).
+  function ingresosActuales() {
+    const vigente = M.periodoDe(estado.perfil, M.mesActual());
+    const fijo = !!vigente && vigente.tipo === 'fijo';
+    return { fijo, salario: fijo ? vigente.monto : 0, promedio: estado.perfil.ingresoAproximado };
+  }
+  function camposIngreso(prefijo, b) {
+    return `<div class="tarjeta plana" style="padding:4px 14px;margin-bottom:14px">
+        <label class="interruptor"><span>Tengo un salario fijo<small>Gano lo mismo todos los meses</small></span><input type="checkbox" id="${prefijo}-fijo"${b.fijo ? ' checked' : ''}></label></div>
+      <label class="campo" id="${prefijo}-campo-salario"${b.fijo ? '' : ' hidden'}><span>¿Cuánto ganas al mes?</span>
+        <input id="${prefijo}-salario" class="entrada monto" inputmode="numeric" placeholder="$0" value="${b.salario ? esc(pesos(b.salario)) : ''}">
+        <small>Se cuenta solo cada mes, sin que tengas que anotarlo. Las primas o los extras los agregas aparte cuando lleguen.</small></label>
+      <div id="${prefijo}-campo-variable"${b.fijo ? ' hidden' : ''}>
+        <p class="texto">Sin salario fijo, cada mes anotas lo que de verdad recibiste (puedes agregar varios pagos) y Platica te lo recuerda.</p>
+        <label class="campo"><span>¿Cuánto recibes en un mes normal? (opcional)</span>
+          <input id="${prefijo}-promedio" class="entrada monto" inputmode="numeric" placeholder="$0" value="${b.promedio ? esc(pesos(b.promedio)) : ''}">
+          <small>Solo se usa en los simuladores de crédito mientras registras tus primeros meses.</small></label></div>`;
+  }
+  function montarCamposIngreso(raiz, prefijo) {
+    const caja = $(`#${prefijo}-fijo`, raiz);
+    caja.addEventListener('change', () => {
+      $(`#${prefijo}-campo-salario`, raiz).hidden = !caja.checked;
+      $(`#${prefijo}-campo-variable`, raiz).hidden = caja.checked;
+    });
+  }
+  function leerCamposIngreso(raiz, prefijo) {
+    return {
+      fijo: $(`#${prefijo}-fijo`, raiz).checked,
+      salario: M.leerMonto($(`#${prefijo}-salario`, raiz).value),
+      promedio: M.leerMonto($(`#${prefijo}-promedio`, raiz).value),
+    };
+  }
+  // La modalidad de ingresos cuenta desde este mes: los meses anteriores conservan la que tenían.
+  function aplicarIngresos(datos) {
+    const mes = M.mesActual();
+    const nuevo = datos.fijo ? { desde: mes, tipo: 'fijo', monto: datos.salario } : { desde: mes, tipo: 'variable', monto: 0 };
+    const vigente = M.periodoDe(estado.perfil, mes);
+    if (!vigente || vigente.tipo !== nuevo.tipo || vigente.monto !== nuevo.monto) {
+      estado.perfil.periodos = M.normalizarPeriodos([...estado.perfil.periodos.filter((x) => x.desde !== mes), nuevo]);
+    }
+    if (!datos.fijo) estado.perfil.ingresoAproximado = datos.promedio;
+  }
+  function textoPeriodo(x) {
+    return x.tipo === 'fijo' ? `Salario fijo de ${pesos(x.monto)}` : 'Ingresos variables';
+  }
 
   function mostrarError(caja, texto) {
     caja.textContent = texto;
@@ -984,15 +1075,26 @@
 
   // ----- ingresos -----
   VISTAS.ingresos = (v) => ({ titulo: `Ingresos de ${M.mesSolo(v.mes)}`, html: `${selectorMes('mes-ingresos', v.mes)}${htmlListaIngresos(v.mes)}` });
-  const CONCEPTOS = ['Salario', 'Quincena', 'Prima', 'Honorarios', 'Ventas', 'Arriendo recibido', 'Otro'];
+  const CONCEPTOS = ['Salario', 'Quincena', 'Prima', 'Bonificación', 'Horas extra', 'Honorarios', 'Ventas', 'Otro'];
+  // v.clase === 'salario': con salario fijo, el valor que de verdad se recibió ese mes (reemplaza el salario fijo solo en ese mes).
   VISTAS.ingreso = (v) => {
     const i = v.id ? estado.ingresos.find((x) => x.id === v.id) : null;
     if (v.id && !i) return null;
-    const b = v.borrador || (v.borrador = i ? { ...i } : { monto: v.monto || 0, concepto: 'Salario', fecha: v.mes && v.mes !== M.mesActual() ? `${v.mes}-01` : M.hoy() });
-    return { titulo: i ? 'Editar ingreso' : 'Nuevo ingreso', html: `<form id="form-ingreso" autocomplete="off">
+    const mes = i ? i.fecha.slice(0, 7) : (v.mes || M.mesActual());
+    const fijo = M.esFijo(estado.perfil, mes);
+    const b = v.borrador || (v.borrador = i ? { ...i } : {
+      monto: v.monto || 0, tipo: v.clase === 'salario' ? 'salario' : 'ingreso',
+      concepto: v.clase === 'salario' ? `Salario de ${M.mesSolo(mes)}` : fijo ? 'Prima' : 'Salario',
+      fecha: mes !== M.mesActual() ? `${mes}-01` : M.hoy(),
+    });
+    const titulo = i ? 'Editar ingreso' : b.tipo === 'salario' ? `Salario de ${M.mesSolo(mes)}` : fijo ? 'Ingreso extra' : 'Nuevo ingreso';
+    return { titulo, html: `<form id="form-ingreso" autocomplete="off">
       <div class="monto-grande"><label class="oculto-visual" for="i-monto">Valor</label><input id="i-monto" class="monto" inputmode="numeric" placeholder="$0" value="${b.monto ? esc(pesos(b.monto)) : ''}"><small>¿Cuánto recibiste?</small></div>
-      <span class="etiqueta-campo">Concepto</span>
-      <div class="chips" style="margin-bottom:10px">${CONCEPTOS.map((t) => `<button type="button" class="chip" data-concepto="${esc(t)}" aria-pressed="${b.concepto === t}">${esc(t)}</button>`).join('')}</div>
+      ${fijo ? `<span class="etiqueta-campo">¿Qué es este ingreso?</span>
+        <div class="segmentado" role="group"><button type="button" data-clase="ingreso" aria-pressed="${b.tipo !== 'salario'}">Un ingreso extra</button><button type="button" data-clase="salario" aria-pressed="${b.tipo === 'salario'}">Mi salario de este mes</button></div>
+        <p class="nota" id="i-nota-salario" style="margin:-6px 0 14px"${b.tipo === 'salario' ? '' : ' hidden'}>Reemplaza tu salario fijo solo en este mes; por ejemplo, si por una incapacidad te pagaron menos.</p>` : ''}
+      <div id="i-conceptos"${b.tipo === 'salario' ? ' hidden' : ''}><span class="etiqueta-campo">Concepto</span>
+      <div class="chips" style="margin-bottom:10px">${CONCEPTOS.map((t) => `<button type="button" class="chip" data-concepto="${esc(t)}" aria-pressed="${b.concepto === t}">${esc(t)}</button>`).join('')}</div></div>
       <label class="campo"><span class="oculto-visual">Concepto</span><input id="i-concepto" class="entrada" maxlength="60" value="${esc(b.concepto)}"></label>
       <label class="campo"><span>Fecha</span><input type="date" id="i-fecha" class="entrada" value="${esc(b.fecha)}" max="${M.hoy()}"></label>
       <div id="i-error" class="error-texto" hidden></div>
@@ -1005,6 +1107,17 @@
           $$('[data-concepto]', raiz).forEach((x) => x.setAttribute('aria-pressed', String(x === chip)));
         });
       }
+      for (const boton of $$('[data-clase]', raiz)) {
+        boton.addEventListener('click', () => {
+          b.tipo = boton.dataset.clase;
+          $$('[data-clase]', raiz).forEach((x) => x.setAttribute('aria-pressed', String(x === boton)));
+          $('#i-nota-salario', raiz).hidden = b.tipo !== 'salario';
+          $('#i-conceptos', raiz).hidden = b.tipo === 'salario';
+          const concepto = $('#i-concepto', raiz);
+          if (b.tipo === 'salario') concepto.value = `Salario de ${M.mesSolo(mes)}`;
+          else if (/^Salario de /.test(concepto.value)) concepto.value = 'Prima';
+        });
+      }
       $('#form-ingreso', raiz).addEventListener('submit', (ev) => {
         ev.preventDefault();
         const monto = M.leerMonto($('#i-monto', raiz).value);
@@ -1012,12 +1125,15 @@
         const concepto = $('#i-concepto', raiz).value.trim().slice(0, 60) || 'Ingreso';
         if (!monto) return mostrarError($('#i-error', raiz), 'Escribe cuánto recibiste.');
         if (!M.esFecha(fecha) || fecha > M.hoy()) return mostrarError($('#i-error', raiz), 'Elige una fecha válida.');
-        const registro = { id: i ? i.id : M.idNuevo(), fecha, concepto, monto };
+        const tipo = b.tipo === 'salario' && M.esFijo(estado.perfil, fecha.slice(0, 7)) ? 'salario' : 'ingreso';
+        const registro = { id: i ? i.id : M.idNuevo(), fecha, concepto, monto, tipo };
+        // Un mes tiene un solo valor de salario.
+        if (tipo === 'salario') estado.ingresos = estado.ingresos.filter((x) => x === i || x.tipo !== 'salario' || x.fecha.slice(0, 7) !== fecha.slice(0, 7));
         if (i) estado.ingresos[estado.ingresos.indexOf(i)] = registro;
         else estado.ingresos.push(registro);
         guardar();
         cerrarVista();
-        avisar(i ? 'Ingreso actualizado' : `Ingreso de ${pesos(monto)} guardado`);
+        avisar(i ? 'Ingreso actualizado' : tipo === 'salario' ? `Salario de ${M.mesSolo(fecha.slice(0, 7))}: ${pesos(monto)}` : `Ingreso de ${pesos(monto)} guardado`);
       });
       if (!i && !b.monto) setTimeout(() => $('#i-monto', raiz).focus(), 60);
     } };
@@ -1432,7 +1548,7 @@
       const actual = M.resumenMes(estado, mes);
       const gastos = previos.length ? Math.round(M.suma(previos.map((r) => r.total - r.abonosDeuda)) / previos.length)
         : Math.max(0, Math.round((actual.proyeccion - actual.abonosDeuda) / 1000) * 1000);
-      v.borrador = { ingresos: ingresoMes(mes).total || estado.perfil.ingresoBase, financieros: M.cuotasMensuales(estado), gastos, tasa: 1.5, plazo: 60 };
+      v.borrador = { ingresos: M.ingresoReferencia(estado), financieros: M.cuotasMensuales(estado), gastos, tasa: 1.5, plazo: 60 };
     }
     const b = v.borrador;
     return { titulo: '¿Cuánto me prestarían?', html: `<p class="texto">Calcula cuánto podrías pedir prestado sin apretar tu bolsillo, con base en tus ingresos y gastos. Los datos vienen de lo que registraste; puedes cambiarlos.</p>
@@ -1685,9 +1801,14 @@
     let html = `${selectorMes('mes-resumen', v.mes)}${v.automatico ? `<div class="banner bien">${icono('trofeo')}<div><strong>Terminó ${esc(M.mesSolo(v.mes))}</strong><p>Este es tu resumen del mes. Lo encuentras siempre en Inicio.</p></div></div>` : ''}
       <section class="tarjeta heroe"><span class="etiqueta">${r.ingresos > 0 ? (r.disponible >= 0 ? (r.esActual ? 'Te queda por ahora' : 'Te quedó') : (r.esActual ? 'Te pasaste por' : 'Te faltaron')) : 'Gastaste'}</span>
       <strong class="cifra-heroe${r.ingresos > 0 && r.disponible < 0 ? ' negativa' : ''}">${pesos(r.ingresos > 0 ? Math.abs(r.disponible) : r.total)}</strong>
-      <div class="cifras"><div class="cifra"><span>Ingresos</span><strong>${cifra(r.ingresos)}</strong>${r.ingresoEstimado ? '<small>estimado</small>' : ''}</div>
+      <div class="cifras"><div class="cifra"><span>Ingresos</span><strong>${cifra(r.ingresos)}</strong><small>${detalleIngresos(r)}</small></div>
       <div class="cifra"><span>Gastos</span><strong>${cifra(r.total)}</strong><small>${cambio != null ? `${cambio >= 0 ? '↑' : '↓'} ${porcentaje(Math.abs(cambio))} vs. ${esc(M.mesCorto(anterior.mes))}` : plural(r.cantidad, 'pago', 'pagos')}</small></div>
       <div class="cifra"><span>Ahorro</span><strong class="${ahorro != null && ahorro < 0 ? 'texto-critico' : ''}">${ahorro != null ? porcentaje(ahorro) : '—'}</strong><small>${r.esActual ? 'hasta hoy' : 'de tus ingresos'}</small></div></div></section>`;
+    if (r.ingresoPendiente) {
+      html += `<div class="banner aviso">${icono('billetera')}<div><strong>${r.esActual ? 'Aún no registras tus ingresos de este mes' : `No registraste ingresos en ${esc(M.mesSolo(v.mes))}`}</strong>
+        <p>Agrégalos para saber cuánto te quedó y qué parte se fue en gastos.</p>
+        <div class="botones"><button type="button" class="boton primario pequeno" data-accion="nuevo-ingreso" data-mes="${v.mes}">${icono('suma')}Agregar ingreso</button></div></div></div>`;
+    }
     if (!r.cantidad) return { titulo: `Resumen de ${M.mesSolo(v.mes)}`, html: html + '<div class="vacio"><p>No hay gastos registrados en este mes.</p></div>' };
     html += `<section class="tarjeta"><h2>Por categoría</h2><div class="tabla-scroll"><table class="tabla"><thead><tr><th>Categoría</th><th>Gasto</th><th>%</th><th>vs. mes anterior</th></tr></thead><tbody>
       ${r.porCategoria.map((x) => {
@@ -1772,24 +1893,56 @@
   VISTAS.articulo = (v) => (ARTICULOS[v.id] ? { titulo: ARTICULOS[v.id].titulo, html: `<div class="articulo">${ARTICULOS[v.id].cuerpo()}</div>` } : null);
 
   // ----- ajustes -----
-  VISTAS.perfil = () => ({ titulo: 'Tu perfil', html: `<form id="form-perfil" autocomplete="off">
-    <label class="campo"><span>Nombre</span><input id="pf-nombre" class="entrada" maxlength="40" value="${esc(estado.perfil.nombre)}"></label>
-    <label class="campo"><span>Ingreso mensual de referencia</span><input id="pf-ingreso" class="entrada monto" inputmode="numeric" value="${estado.perfil.ingresoBase ? esc(pesos(estado.perfil.ingresoBase)) : ''}">
-      <small>Se usa en los meses donde no registres ingresos. Lo que registres en cada mes siempre tiene prioridad.</small></label>
-    <div id="pf-error" class="error-texto" hidden></div>
-    <button type="submit" class="boton primario ancho">${icono('check')}Guardar</button></form>`,
-  montar: (raiz) => {
-    $('#form-perfil', raiz).addEventListener('submit', (ev) => {
-      ev.preventDefault();
-      const ingreso = M.leerMonto($('#pf-ingreso', raiz).value);
-      if (!ingreso) return mostrarError($('#pf-error', raiz), 'Escribe tu ingreso mensual.');
-      estado.perfil.nombre = $('#pf-nombre', raiz).value.trim().slice(0, 40);
-      estado.perfil.ingresoBase = ingreso;
-      guardar();
-      cerrarVista();
-      avisar('Perfil guardado');
-    });
-  } });
+  VISTAS.perfil = (v) => {
+    const b = v.borrador || (v.borrador = { nombre: estado.perfil.nombre, ...ingresosActuales() });
+    const historial = [...estado.perfil.periodos].reverse();
+    return { titulo: 'Tu perfil', html: `<form id="form-perfil" autocomplete="off">
+      <label class="campo"><span>Nombre</span><input id="pf-nombre" class="entrada" maxlength="40" value="${esc(b.nombre)}"></label>
+      <h3>Tus ingresos</h3>
+      ${camposIngreso('pf', b)}
+      <div id="pf-error" class="error-texto" hidden></div>
+      <button type="submit" class="boton primario ancho">${icono('check')}Guardar</button>
+      <p class="nota">Los cambios cuentan desde este mes; los meses anteriores conservan los ingresos que tenían.</p>
+      ${historial.length ? `<h3>Historial</h3><div class="lista tarjeta plana">${historial.map((x) => `<div class="fila"><span class="centro"><strong>${esc(textoPeriodo(x))}</strong>
+        <small>Desde ${esc(M.mesSolo(x.desde))} de ${x.desde.slice(0, 4)}</small></span></div>`).join('')}</div>` : ''}</form>`,
+    montar: (raiz) => {
+      montarCamposIngreso(raiz, 'pf');
+      $('#form-perfil', raiz).addEventListener('submit', async (ev) => {
+        ev.preventDefault();
+        const datos = leerCamposIngreso(raiz, 'pf');
+        if (datos.fijo && !datos.salario) return mostrarError($('#pf-error', raiz), 'Escribe cuánto ganas al mes.');
+        const nombre = $('#pf-nombre', raiz).value.trim().slice(0, 40);
+        // Cambiar de modalidad a mitad de mes: que el mes no cuente el salario dos veces ni se quede sin él.
+        const mes = M.mesActual();
+        const antes = M.ingresoDelMes(estado, mes);
+        let quitar = [];
+        let anotar = null;
+        if (datos.fijo && !antes.fijo) {
+          const anotados = antes.lista.filter((i) => i.tipo !== 'salario');
+          if (anotados.length && await confirmar({ titulo: '¿Eran parte de tu salario?',
+            texto: `Este mes ya anotaste ${pesos(M.suma(anotados, 'monto'))} en ingresos. Si eran parte de tu salario, se quitan para no contarlo dos veces; si no, quedan como ingresos extra.`,
+            si: 'Sí, quitarlos', no: 'No, son extras' })) quitar = anotados;
+        } else if (!datos.fijo && antes.fijo && !antes.ajuste && antes.salario > 0) {
+          if (await confirmar({ titulo: `¿Ya recibiste el salario de ${M.mesSolo(mes)}?`,
+            texto: `Con ingresos variables, cada mes cuenta solo lo que anotes. Si ya te pagaron este mes, lo dejo anotado por ${pesos(antes.salario)}.`,
+            si: 'Sí, anotarlo', no: 'Todavía no' })) {
+            anotar = { id: M.idNuevo(), fecha: M.hoy(), concepto: `Salario de ${M.mesSolo(mes)}`, monto: antes.salario, tipo: 'ingreso' };
+          }
+        }
+        estado.perfil.nombre = nombre;
+        aplicarIngresos(datos);
+        if (quitar.length) estado.ingresos = estado.ingresos.filter((i) => !quitar.includes(i));
+        if (anotar) estado.ingresos.push(anotar);
+        guardar();
+        cerrarVista();
+        avisar('Perfil guardado');
+      });
+    } };
+  };
+  CAPTURAR.perfil = (v, raiz) => {
+    if (!$('#pf-nombre', raiz)) return;
+    v.borrador = { nombre: $('#pf-nombre', raiz).value, ...leerCamposIngreso(raiz, 'pf') };
+  };
   let permisoNotif = 'concedido';
   try { if (ANDROID) permisoNotif = ANDROID.permisoNotificaciones(); } catch (e) { permisoNotif = 'denegado'; }
   VISTAS.recordatorios = () => {
@@ -1805,6 +1958,7 @@
         <label class="interruptor"><span>Cuotas por vencer<small>Dos días antes y el día del pago, para cada deuda con día de pago</small></span><input type="checkbox" data-ajuste="recordatorioCuotas"${a.recordatorioCuotas ? ' checked' : ''}></label>
         <label class="interruptor"><span>Registrar los gastos del día<small>Un aviso diario a la hora que elijas</small></span><input type="checkbox" data-ajuste="recordatorioDiario"${a.recordatorioDiario ? ' checked' : ''}></label>
         <label class="interruptor"><span>Resumen del mes<small>El día 1 de cada mes</small></span><input type="checkbox" data-ajuste="resumenMensual"${a.resumenMensual ? ' checked' : ''}></label>
+        ${M.esFijo(estado.perfil, M.mesActual()) ? '' : `<label class="interruptor"><span>Anotar tus ingresos<small>Tus ingresos son variables: te recuerdo registrarlos cada mes</small></span><input type="checkbox" data-ajuste="recordatorioIngresos"${a.recordatorioIngresos ? ' checked' : ''}></label>`}
       </section>
       <label class="campo"${a.recordatorioDiario ? '' : ' hidden'} id="rc-hora-campo"><span>Hora del aviso diario</span><input id="rc-hora" type="time" class="entrada" value="${esc(a.horaDiario)}"></label>
       <h3>Próximos avisos</h3>${proximos.length ? `<div class="lista tarjeta plana">${proximos.map((r) => `<div class="fila"><span class="centro"><strong>${esc(r.titulo)}</strong><small>${esc(fecha(r.cuando))}</small></span></div>`).join('')}</div>` : '<p class="texto">No hay avisos programados.</p>'}`,
@@ -1938,7 +2092,9 @@
     if (!manual) {
       let pospuesta = null;
       try { pospuesta = JSON.parse(localStorage.getItem(CLAVE_POSPUESTA)); } catch (e) { /* nada pospuesto */ }
-      if (pila.length || (pospuesta && pospuesta.codigo === nuevaVersion.codigo && Date.now() < pospuesta.hasta)) return;
+      // El aviso también sale sobre la bienvenida: si algo impide terminarla, la versión nueva debe poder instalarse.
+      const soloBienvenida = pila.length === 1 && pila[0].tipo === 'bienvenida';
+      if ((pila.length && !soloBienvenida) || (pospuesta && pospuesta.codigo === nuevaVersion.codigo && Date.now() < pospuesta.hasta)) return;
     }
     mostrar({ tipo: 'version' });
   }
@@ -2119,19 +2275,9 @@
         render(true);
       });
     },
-    'confirmar-ingreso': () => {
-      const v = vistaActual();
-      const mes = v && v.mes ? v.mes : mesVista;
-      const fecha = mes === M.mesActual() ? M.hoy() : `${mes}-${String(Math.min(30, M.diasDelMes(mes))).padStart(2, '0')}`;
-      const registro = { id: M.idNuevo(), fecha, concepto: 'Ingreso del mes', monto: estado.perfil.ingresoBase };
-      estado.ingresos.push(registro);
-      guardar();
-      render(true);
-      avisar(`Ingreso de ${pesos(registro.monto)} confirmado`, () => {
-        estado.ingresos = estado.ingresos.filter((x) => x !== registro);
-        guardar();
-        render(true);
-      });
+    'ajustar-salario': (el) => {
+      const mes = el.dataset.mes || mesVista;
+      mostrar({ tipo: 'ingreso', mes, clase: 'salario', monto: ingresoMes(mes).salarioFijo });
     },
     'nueva-deuda': () => mostrar({ tipo: 'deudaForm' }),
     'editar-deuda': (el) => mostrar({ tipo: 'deudaForm', id: el.dataset.id }),
@@ -2242,16 +2388,47 @@
     const accion = ACCIONES[el.dataset.accion];
     if (!accion) return;
     ev.preventDefault();
+    // Una acción puede cambiar la pantalla: primero se guarda lo escrito y se sale del campo.
+    if (escribiendo() && !el.matches(CAMPOS_TEXTO)) {
+      capturar();
+      document.activeElement.blur();
+    }
     accion(el, ev);
   });
+
+  // El teclado de Android encoge la pantalla: cambia el alto, no el ancho. Eso no debe redibujar nada, porque el campo
+  // donde se escribe se reemplazaría y el teclado se cerraría. Solo un cambio de ancho (girar el teléfono) redibuja
+  // las gráficas, y se espera a que no haya un campo activo.
+  let anchoVista = document.documentElement.clientWidth;
+  let altoLibre = window.innerHeight;
+  let redibujar = false;
   let temporizadorAncho = null;
+  function redibujarSiHaceFalta() {
+    if (!redibujar || escribiendo()) return;
+    redibujar = false;
+    capturar();
+    render(true);
+  }
   window.addEventListener('resize', () => {
+    const ancho = document.documentElement.clientWidth;
+    const alto = window.innerHeight;
+    if (ancho !== anchoVista) {
+      anchoVista = ancho;
+      altoLibre = alto;
+      redibujar = true;
+    } else {
+      altoLibre = Math.max(altoLibre, alto);
+    }
+    // Con el teclado abierto se esconden las pestañas y el botón +, y el campo activo queda a la vista.
+    const teclado = alto < altoLibre * 0.8;
+    document.body.classList.toggle('teclado', teclado);
+    if (teclado && escribiendo()) {
+      setTimeout(() => { if (escribiendo()) document.activeElement.scrollIntoView({ block: 'center', behavior: 'smooth' }); }, 150);
+    }
     clearTimeout(temporizadorAncho);
-    temporizadorAncho = setTimeout(() => {
-      capturar();
-      render(true);
-    }, 200);
+    temporizadorAncho = setTimeout(redibujarSiHaceFalta, 200);
   });
+  document.addEventListener('focusout', () => setTimeout(redibujarSiHaceFalta, 50));
 
   // ---------- cambio de mes y vuelta a la app ----------
   let mesAbierto = M.mesActual();

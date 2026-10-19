@@ -204,8 +204,10 @@
 
   function estadoVacio() {
     return {
-      formato: 1,
-      perfil: { nombre: '', ingresoBase: 0, desde: '', configurado: false },
+      formato: 2,
+      // periodos: cómo son los ingresos desde cada mes ({ desde, tipo: 'fijo' | 'variable', monto }).
+      // Cambiar de salario o de modalidad agrega un periodo nuevo, así los meses anteriores no cambian.
+      perfil: { nombre: '', periodos: [], ingresoAproximado: 0, desde: '', configurado: false },
       categorias: CATEGORIAS_BASE.map((c) => ({ ...c, base: true, limite: 0 })),
       ingresos: [],
       gastos: [],
@@ -213,11 +215,25 @@
       puntajes: [],
       diagnostico: null,
       ajustes: {
-        recordatorioCuotas: true, recordatorioDiario: false, horaDiario: '20:00', resumenMensual: true,
+        recordatorioCuotas: true, recordatorioDiario: false, horaDiario: '20:00', resumenMensual: true, recordatorioIngresos: true,
         usura: { ...USURA },
       },
       vistos: { resumen: '', notificaciones: false },
     };
+  }
+
+  function normalizarPeriodos(lista) {
+    const porMes = new Map();
+    for (const x of Array.isArray(lista) ? lista : []) {
+      if (!x || !esMes(x.desde)) continue;
+      const tipo = x.tipo === 'fijo' ? 'fijo' : 'variable';
+      const monto = tipo === 'fijo' ? entero(x.monto, 0, 1e11) : 0;
+      if (tipo === 'fijo' && !monto) continue;
+      porMes.set(x.desde, { desde: x.desde, tipo, monto });
+    }
+    // Un periodo igual al anterior no cambia nada: se descarta.
+    const ordenados = [...porMes.values()].sort((a, b) => a.desde.localeCompare(b.desde));
+    return ordenados.filter((x, i) => i === 0 || x.tipo !== ordenados[i - 1].tipo || x.monto !== ordenados[i - 1].monto).slice(-240);
   }
 
   function normalizarDiagnostico(d) {
@@ -255,9 +271,13 @@
     const e = estadoVacio();
     if (!entrada || typeof entrada !== 'object') return e;
     const p = entrada.perfil || {};
+    let aproximado = entero(p.ingresoAproximado, 0, 1e11);
+    // La 1.0 guardaba un «ingreso mensual de referencia»: pasa a ser el promedio aproximado.
+    if (!Array.isArray(p.periodos) && !aproximado) aproximado = entero(p.ingresoBase, 0, 1e11);
     e.perfil = {
       nombre: texto(p.nombre, 40),
-      ingresoBase: entero(p.ingresoBase, 0, 1e11),
+      periodos: normalizarPeriodos(p.periodos),
+      ingresoAproximado: aproximado,
       desde: esMes(p.desde) ? p.desde : '',
       configurado: p.configurado === true,
     };
@@ -334,8 +354,10 @@
         };
       }).filter((g) => g.monto > 0);
 
+    // tipo «salario»: con salario fijo, reemplaza el salario de ese mes (por ejemplo, una incapacidad o un aumento a mitad de año).
     e.ingresos = (Array.isArray(entrada.ingresos) ? entrada.ingresos : []).filter((i) => i && idValido(i.id) && esFecha(i.fecha))
-      .slice(-5000).map((i) => ({ id: i.id, fecha: i.fecha, concepto: texto(i.concepto, 60) || 'Ingreso', monto: entero(i.monto, 1, 1e11) }))
+      .slice(-5000).map((i) => ({ id: i.id, fecha: i.fecha, concepto: texto(i.concepto, 60) || 'Ingreso', monto: entero(i.monto, 1, 1e11),
+        tipo: i.tipo === 'salario' ? 'salario' : 'ingreso' }))
       .filter((i) => i.monto > 0);
 
     e.puntajes = (Array.isArray(entrada.puntajes) ? entrada.puntajes : []).filter((s) => s && idValido(s.id) && esFecha(s.fecha))
@@ -351,6 +373,7 @@
       recordatorioDiario: a.recordatorioDiario === true,
       horaDiario: typeof a.horaDiario === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(a.horaDiario) ? a.horaDiario : '20:00',
       resumenMensual: a.resumenMensual !== false,
+      recordatorioIngresos: a.recordatorioIngresos !== false,
       usura: { ea: numero(usura.ea, 1, 200) || USURA.ea, vigencia: esMes(usura.vigencia) ? usura.vigencia : USURA.vigencia },
     };
     const v = entrada.vistos || {};
@@ -366,13 +389,39 @@
   function ingresosDe(estado, mes) {
     return estado.ingresos.filter((i) => i.fecha.startsWith(mes)).sort((a, b) => b.fecha.localeCompare(a.fecha));
   }
-  // Si en el mes no se registró ningún ingreso, se usa el ingreso mensual que la persona indicó (marcado como estimado).
+  // El periodo vigente en un mes: el último que empezó ese mes o antes. Sin periodo, los ingresos se registran a mano.
+  function periodoDe(perfil, mes) {
+    let elegido = null;
+    for (const x of perfil.periodos) if (x.desde <= mes) elegido = x;
+    return elegido;
+  }
+  function esFijo(perfil, mes) {
+    const x = periodoDe(perfil, mes);
+    return !!x && x.tipo === 'fijo';
+  }
+  // Con salario fijo, cada mes cuenta solo el salario (o el ajuste de ese mes) más los ingresos extra.
+  // Con ingresos variables, cuenta lo que se registró; si no hay nada, el mes queda pendiente.
   function ingresoDelMes(estado, mes, ahora = new Date()) {
     const lista = ingresosDe(estado, mes);
-    if (lista.length) return { total: suma(lista, 'monto'), estimado: false, lista };
-    const desde = estado.perfil.desde;
-    const usaBase = estado.perfil.ingresoBase > 0 && desde && mes >= desde && mes <= mesActual(ahora);
-    return { total: usaBase ? estado.perfil.ingresoBase : 0, estimado: usaBase, lista };
+    const p = estado.perfil;
+    const enUso = !!p.desde && mes >= p.desde && mes <= mesActual(ahora);
+    const periodo = periodoDe(p, mes);
+    if (periodo && periodo.tipo === 'fijo') {
+      const ajuste = lista.find((i) => i.tipo === 'salario') || null;
+      const extras = lista.filter((i) => i !== ajuste);
+      const salario = ajuste ? ajuste.monto : (enUso ? periodo.monto : 0);
+      return { total: salario + suma(extras, 'monto'), fijo: true, salario, salarioFijo: periodo.monto, ajuste, extras, pendiente: false, lista };
+    }
+    return { total: suma(lista, 'monto'), fijo: false, salario: 0, salarioFijo: 0, ajuste: null, extras: lista, pendiente: enUso && !lista.length, lista };
+  }
+  // Lo que entra en un mes normal: se usa para la carga de las deudas y los simuladores de crédito.
+  function ingresoReferencia(estado, ahora = new Date()) {
+    const mes = mesActual(ahora);
+    const actual = ingresoDelMes(estado, mes, ahora);
+    if (actual.fijo) return actual.salarioFijo;
+    const previos = [1, 2, 3].map((n) => ingresoDelMes(estado, sumarMeses(mes, -n), ahora).total).filter((v) => v > 0);
+    const promedio = previos.length ? Math.round(suma(previos) / previos.length) : estado.perfil.ingresoAproximado || 0;
+    return Math.max(actual.total, promedio);
   }
 
   function resumenMes(estado, mes, ahora = new Date()) {
@@ -415,7 +464,8 @@
     const proyeccion = esActual && dia >= 7 && dia < dias ? Math.round(fijos + (total - fijos) / dia * dias) : total;
     return {
       mes, esActual, dias, dia, gastos, cantidad: gastos.length, total,
-      ingresos: ingreso.total, ingresoEstimado: ingreso.estimado, listaIngresos: ingreso.lista,
+      ingresos: ingreso.total, ingresoFijo: ingreso.fijo, ingresoPendiente: ingreso.pendiente, salario: ingreso.salario,
+      ingresoAjustado: !!ingreso.ajuste, extras: ingreso.extras, listaIngresos: ingreso.lista,
       disponible: ingreso.total - total,
       pctGastado: ingreso.total > 0 ? total / ingreso.total : null,
       porCategoria: categorias, porDia, acumulado, proyeccion,
@@ -432,7 +482,7 @@
     for (let i = cantidad - 1; i >= 0; i--) {
       const m = sumarMeses(mes, -i);
       const r = resumenMes(estado, m, ahora);
-      lista.push({ mes: m, ingresos: r.ingresos, gastos: r.total, estimado: r.ingresoEstimado });
+      lista.push({ mes: m, ingresos: r.ingresos, gastos: r.total, pendiente: r.ingresoPendiente });
     }
     return lista;
   }
@@ -496,8 +546,8 @@
       return lista;
     }
     if (ing <= 0) {
-      agregar('sin-ingresos', 'idea', 'Registra lo que recibiste este mes',
-        'Sin los ingresos no se puede saber qué parte de tu plata se fue en gastos. En la pantalla de inicio toca «Ingresos» y escribe lo que te entró.');
+      agregar('sin-ingresos', 'idea', r.esActual ? 'Registra lo que has recibido este mes' : `Registra lo que recibiste en ${mesSolo(mes)}`,
+        'Sin los ingresos no se puede saber qué parte de tu plata se fue en gastos. En Inicio toca «Ingresos» y anota lo que te entró; si te pagan por partes, agrega cada pago.');
     }
     // El mes en curso se juzga por la proyección, y solo cuando ya hay una semana de datos.
     const cierre = r.esActual ? r.proyeccion : r.total;
@@ -781,7 +831,7 @@
     const abiertasConApertura = conApertura.filter((d) => !d.cerrada);
     const edades = abiertasConApertura.map((d) => Math.max(0, mesesEntre(d.apertura, mes)));
     const ultima = conApertura.reduce((max, d) => (d.apertura > max ? d.apertura : max), '');
-    const ingreso = ingresoDelMes(estado, mes, ahora).total;
+    const ingreso = ingresoReferencia(estado, ahora);
     const cuotas = cuotasMensuales(estado);
     const usura = estado.ajustes.usura.ea / 100;
     return {
@@ -1154,6 +1204,22 @@
           'Toma menos de un minuto y te deja ver en qué se va tu plata.');
       }
     }
+    // Con ingresos variables, la app recuerda anotarlos: el 10 y el 20 si el mes sigue sin ingresos, y el 3 de los meses siguientes.
+    if (estado.ajustes.recordatorioIngresos && estado.perfil.configurado) {
+      const mes = mesActual(ahora);
+      if (!esFijo(estado.perfil, mes) && ingresoDelMes(estado, mes, ahora).pendiente) {
+        for (const dia of ['10', '20']) {
+          agregar(`ingresos-${mes}-${dia}`, aMilisegundos(`${mes}-${dia}`, '19:00'), `¿Cuánto has recibido en ${mesSolo(mes)}?`,
+            'Tus ingresos son variables: anótalos en Platica para saber cuánto te queda este mes.');
+        }
+      }
+      for (let i = 1; i <= 2; i++) {
+        const siguiente = sumarMeses(mes, i);
+        if (esFijo(estado.perfil, siguiente)) continue;
+        agregar(`ingresos-${siguiente}-03`, aMilisegundos(`${siguiente}-03`, '19:00'), `Anota lo que recibas en ${mesSolo(siguiente)}`,
+          'Cuando te paguen, registra el valor en Platica. Si te pagan por partes, agrega cada pago.');
+      }
+    }
     if (estado.ajustes.resumenMensual) {
       for (let i = 1; i <= 2; i++) {
         const mes = sumarMeses(mesActual(ahora), i);
@@ -1178,9 +1244,15 @@
       const deuda = g.deuda ? (estado.deudas.find((d) => d.id === g.deuda.id) || {}).nombre : '';
       filas.push([g.fecha, 'Gasto', categoria(estado, g.categoria).nombre, g.monto, MEDIOS[g.medio] || '', g.nota, deuda || '']);
     }
-    for (const i of [...estado.ingresos].sort((a, b) => a.fecha.localeCompare(b.fecha))) {
-      filas.push([i.fecha, 'Ingreso', i.concepto, i.monto, '', '', '']);
+    const ingresos = estado.ingresos.map((i) => [i.fecha, 'Ingreso', i.tipo === 'salario' ? `${i.concepto} (salario del mes)` : i.concepto, i.monto]);
+    // El salario fijo no se guarda mes a mes: se agrega a la exportación cada mes que se contó.
+    if (estado.perfil.desde) {
+      for (let mes = estado.perfil.desde; mes <= mesActual(); mes = sumarMeses(mes, 1)) {
+        const ing = ingresoDelMes(estado, mes);
+        if (ing.fijo && !ing.ajuste && ing.salario) ingresos.push([`${mes}-01`, 'Ingreso', 'Salario fijo', ing.salario]);
+      }
     }
+    for (const fila of ingresos.sort((a, b) => a[0].localeCompare(b[0]))) filas.push([...fila, '', '', '']);
     // Excel en español separa columnas con punto y coma; el BOM hace que lea bien las tildes.
     return '﻿' + filas.map((f) => f.map(celda).join(';')).join('\r\n') + '\r\n';
   }
@@ -1188,7 +1260,7 @@
   function textoResumen(estado, mes, ahora = new Date()) {
     const r = resumenMes(estado, mes, ahora);
     const lineas = [`Mi resumen de ${mesSolo(mes)} ${mes.slice(0, 4)} (Platica)`, ''];
-    lineas.push(`Ingresos: ${pesos(r.ingresos)}${r.ingresoEstimado ? ' (estimado)' : ''}`);
+    lineas.push(`Ingresos: ${pesos(r.ingresos)}${r.ingresoFijo ? (r.extras.length ? ' (salario fijo y extras)' : ' (salario fijo)') : r.ingresoPendiente ? ' (sin registrar)' : ''}`);
     lineas.push(`Gastos: ${pesos(r.total)} en ${r.cantidad} ${r.cantidad === 1 ? 'pago' : 'pagos'}`);
     lineas.push(`${r.disponible >= 0 ? 'Me quedó' : 'Me faltó'}: ${pesos(Math.abs(r.disponible))}`);
     if (r.porCategoria.length) {
@@ -1205,7 +1277,7 @@
     hoy, mesActual, sumarMeses, diasDelMes, mesesEntre, sumarDias, diasEntre, nombreMes, mesSolo, mesCorto,
     fechaCorta, fechaLarga, diaSemana, fechaRelativa, esFecha, esMes, partes,
     idNuevo, estadoVacio, normalizarEstado, categoria,
-    ingresosDe, ingresoDelMes, resumenMes, historialMeses, reparto, recomendacionesMes, gastosBasicos,
+    ingresosDe, ingresoDelMes, ingresoReferencia, periodoDe, esFijo, normalizarPeriodos, resumenMes, historialMeses, reparto, recomendacionesMes, gastosBasicos,
     tasaMensual, tasaEA, eaAMensual, cuotaFija, valorPresente, tablaAmortizacion, mesesParaPagar,
     grupoDe, esRotativa, activas, cuotasMensuales, cuotaUsada, proximoPago, pagosDe, repartoPago, proyeccionDeuda,
     pctPagado, planPagos, plazoRestante,

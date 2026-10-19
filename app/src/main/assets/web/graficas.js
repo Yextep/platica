@@ -205,6 +205,7 @@
       tip.appendChild(fila);
     }
     tip.hidden = false;
+    tipVisible = true;
     const w = tip.offsetWidth;
     const h = tip.offsetHeight;
     const left = Math.max(8, Math.min(window.innerWidth - w - 8, px - w / 2));
@@ -212,7 +213,11 @@
     tip.style.left = `${left}px`;
     tip.style.top = `${top}px`;
   }
+  let tipVisible = false;
   function ocultarTip() {
+    // Se llama en cada desplazamiento: si no hay nada a la vista, no recorre la página.
+    if (!tipVisible) return;
+    tipVisible = false;
     tip = tip || document.getElementById('tooltip');
     if (tip) tip.hidden = true;
     document.querySelectorAll('.grafica .cruz, .grafica .cruz-punto').forEach((e) => e.setAttribute('visibility', 'hidden'));
@@ -239,6 +244,7 @@
           cruz.setAttribute('x1', mejor.x);
           cruz.setAttribute('x2', mejor.x);
           cruz.setAttribute('visibility', 'visible');
+          tipVisible = true;
           if (punto && mejor.y != null) {
             punto.setAttribute('cx', mejor.x);
             punto.setAttribute('cy', mejor.y);

@@ -77,6 +77,17 @@ async function cerrarAvisos(p) {
   await p.evaluate(() => document.querySelectorAll('#aviso .toast').forEach((t) => t.remove()));
 }
 
+// El teclado de Android encoge la pantalla: mismo ancho, menos alto.
+async function abrirTeclado(p) {
+  await p.setViewportSize({ width: 412, height: 480 });
+  await p.waitForTimeout(450);
+}
+async function cerrarTeclado(p) {
+  await p.setViewportSize({ width: 412, height: 860 });
+  await p.waitForTimeout(450);
+}
+const foco = (p) => p.evaluate(() => document.activeElement.id);
+
 async function registrarGasto(p, { monto, categoria, nota, medio, fecha }) {
   await p.click('#agregar');
   await esperarVista(p, 'gasto');
@@ -126,17 +137,45 @@ async function principal() {
     await captura(p, 'bienvenida');
     comprobar((await p.evaluate(() => Platica.atras())) === false, 'atrás en la bienvenida deja salir de la app');
     await p.click('[data-accion=bienvenida-siguiente]');
+    // Antes, al abrirse el teclado la pantalla se redibujaba, el campo perdía el foco y el teclado se cerraba.
+    await p.tap('#b-nombre');
+    await p.keyboard.type('Dan');
+    await abrirTeclado(p);
+    comprobar((await foco(p)) === 'b-nombre', 'al abrirse el teclado el campo del nombre conserva el foco');
+    await p.keyboard.type('iel');
+    comprobar((await p.inputValue('#b-nombre')) === 'Daniel', 'se puede seguir escribiendo con el teclado abierto');
+    comprobar(await p.evaluate(() => document.body.classList.contains('teclado')), 'detecta el teclado abierto');
+    await captura(p, 'bienvenida-teclado');
+    comprobar(await p.isHidden('#b-campo-salario') && await p.isVisible('#b-promedio'), 'sin marcar «salario fijo» no pide un salario');
+    await p.click('label.interruptor:has(#b-fijo)');
     await p.click('#form-bienvenida button[type=submit]');
-    comprobar(await p.isVisible('#b-error'), 'pide el ingreso mensual');
-    await p.fill('#b-nombre', 'Daniel');
-    await p.fill('#b-ingreso', '2000000');
-    comprobar((await p.inputValue('#b-ingreso')) === '$2.000.000', 'el ingreso se escribe con puntos de miles');
+    comprobar(await p.isVisible('#b-error:has-text("Escribe cuánto ganas al mes")'), 'con salario fijo pide el valor');
+    await p.tap('#b-salario');
+    await p.keyboard.type('2000000');
+    comprobar((await foco(p)) === 'b-salario' && (await p.inputValue('#b-salario')) === '$2.000.000', 'el salario se escribe con puntos de miles');
+    // Corregir en medio del número: el cursor no salta al final.
+    await p.evaluate(() => document.querySelector('#b-salario').setSelectionRange(4, 4));
+    await p.keyboard.type('5');
+    const cursor = () => p.evaluate(() => document.querySelector('#b-salario').selectionStart);
+    comprobar((await p.inputValue('#b-salario')) === '$20.500.000' && (await cursor()) === 5, 'al escribir en medio del número el cursor sigue en su lugar');
+    await p.keyboard.press('Backspace');
+    // Se borró el 5 que estaba después de «20»: el cursor queda después de esos dos dígitos, en «$2.0|00.000».
+    comprobar((await p.inputValue('#b-salario')) === '$2.000.000' && (await cursor()) === 4, 'borrar en medio del número también respeta el cursor');
+    await cerrarTeclado(p);
+    // Atrás de Android mientras se escribe vuelve al primer paso, y lo escrito se conserva.
+    await p.focus('#b-nombre');
+    await p.evaluate(() => Platica.atras());
+    comprobar(await p.isVisible('[data-accion=bienvenida-siguiente]'), 'atrás vuelve al primer paso aunque se esté escribiendo');
+    await p.click('[data-accion=bienvenida-siguiente]');
+    comprobar((await p.inputValue('#b-nombre')) === 'Daniel' && (await p.inputValue('#b-salario')) === '$2.000.000' && await p.isChecked('#b-fijo'),
+      'al volver al segundo paso se conserva lo escrito');
     await p.click('#form-bienvenida button[type=submit]');
     await esperarVista(p, 'inicio');
     let e = await estado(p);
-    comprobar(e.perfil.configurado && e.perfil.ingresoBase === 2000000 && e.perfil.desde === '2026-10' && e.perfil.nombre === 'Daniel',
-      'guarda el perfil con el ingreso mensual');
-    comprobar(await p.isVisible('text=¿Cuánto recibiste en octubre?'), 'pregunta cuánto se recibió en el mes');
+    comprobar(e.perfil.configurado && e.perfil.desde === '2026-10' && e.perfil.nombre === 'Daniel'
+      && JSON.stringify(e.perfil.periodos) === JSON.stringify([{ desde: '2026-10', tipo: 'fijo', monto: 2000000 }]), 'guarda el salario fijo desde este mes');
+    comprobar(!(await p.isVisible('text=¿Cuánto has recibido')) && await p.isVisible('.cifra:has-text("salario fijo"):has-text("$2.000.000")'),
+      'con salario fijo no pregunta cada mes: lo cuenta solo');
     await captura(p, 'inicio-vacio');
 
     // ---------- gastos ----------
@@ -166,24 +205,50 @@ async function principal() {
     comprobar(transporte && !transporte.base && transporte.color === 8 && transporte.icono === 'bus' && transporte.tipo === 'necesidad'
       && e.gastos.some((g) => g.categoria === transporte.id && g.monto === 9000), 'crea una categoría propia y registra el gasto en ella');
 
-    // Deshacer un gasto recién guardado.
-    await registrarGasto(p, { monto: 5000, categoria: 'imprevistos' });
+    // El formulario de gasto también se llena con el teclado abierto; luego se deshace el gasto recién guardado.
+    await p.click('#agregar');
+    await esperarVista(p, 'gasto');
+    await p.tap('#g-monto');
+    await abrirTeclado(p);
+    await p.keyboard.type('7500');
+    comprobar((await foco(p)) === 'g-monto' && (await p.inputValue('#g-monto')) === '$7.500', 'el valor del gasto se escribe con el teclado abierto');
+    await p.click('[data-cat=imprevistos]');
+    await cerrarTeclado(p);
+    await p.click('#form-gasto button[type=submit]');
+    await esperarVista(p, 'inicio');
+    comprobar((await estado(p)).gastos.length === 14, 'guarda el gasto escrito con el teclado');
     await p.click('#aviso .toast button');
     comprobar((await estado(p)).gastos.length === 13, '«Deshacer» quita el gasto recién guardado');
 
     // ---------- ingresos ----------
-    await p.click('[data-accion=confirmar-ingreso]');
-    e = await estado(p);
-    comprobar(e.ingresos.length === 1 && e.ingresos[0].monto === 2000000 && e.ingresos[0].fecha === '2026-10-19', 'confirma el ingreso del mes con un toque');
     await p.click('[data-accion=ver-ingresos]');
     await esperarVista(p, 'ingresos');
+    comprobar(await p.isVisible('.fila:has-text("Salario fijo"):has-text("+$2.000.000")'), 'el salario fijo aparece solo en los ingresos del mes');
     await p.click('[data-accion=nuevo-ingreso]');
     await esperarVista(p, 'ingreso');
+    comprobar(await p.isVisible('[data-clase=ingreso][aria-pressed=true]'), 'con salario fijo, un ingreso nuevo es un extra');
     await p.fill('#i-monto', '150000');
     await p.click('[data-concepto="Honorarios"]');
     await p.click('#form-ingreso button[type=submit]');
     await esperarVista(p, 'ingresos');
-    comprobar(await p.isVisible('text=+$150.000'), 'agrega otro ingreso al mes');
+    comprobar(await p.isVisible('text=+$150.000') && await p.isVisible('text=$2.150.000 en total'), 'los ingresos extra se suman al salario');
+    // Un mes con otro salario (por ejemplo, una incapacidad) se ajusta sin cambiar el salario fijo.
+    await p.click('[data-accion=ajustar-salario]');
+    await esperarVista(p, 'ingreso');
+    comprobar((await p.inputValue('#i-monto')) === '$2.000.000' && await p.isVisible('[data-clase=salario][aria-pressed=true]'), 'ajustar el salario propone el valor fijo');
+    await p.fill('#i-monto', '1700000');
+    await p.click('#form-ingreso button[type=submit]');
+    await esperarVista(p, 'ingresos');
+    comprobar(await p.isVisible('text=$1.850.000 en total') && await p.isVisible('.fila:has-text("Salario de este mes")'), 'el salario ajustado reemplaza al fijo solo ese mes');
+    await captura(p, 'ingresos', true);
+    await p.click('.fila:has-text("Salario de este mes")');
+    await esperarVista(p, 'ingreso');
+    await p.click('[data-accion=eliminar-ingreso]');
+    await p.click('#dialogo [data-r=si]');
+    await esperarVista(p, 'ingresos');
+    comprobar(await p.isVisible('text=$2.150.000 en total'), 'al quitar el ajuste vuelve a contar el salario fijo');
+    e = await estado(p);
+    comprobar(e.ingresos.length === 1 && e.ingresos[0].tipo === 'ingreso' && e.ingresos[0].monto === 150000, 'solo se guardan los extras: el salario se cuenta solo');
     await p.click('[data-accion=atras]');
     await esperarVista(p, 'inicio');
     const heroe = await p.textContent('.heroe .cifra-heroe');
@@ -208,6 +273,21 @@ async function principal() {
     comprobar((await p.locator('#lista-mov .fila').count()) === 13, 'lista los 13 gastos del mes');
     await p.fill('#buscar', 'tinto');
     comprobar((await p.locator('#lista-mov .fila').count()) === 9, 'busca por nota');
+    await p.fill('#buscar', '12.000');
+    comprobar((await p.locator('#lista-mov .fila').count()) === 9, 'busca por valor escrito con puntos');
+    // El buscador con el teclado abierto, y girar el teléfono mientras se escribe.
+    await p.fill('#buscar', '');
+    await p.tap('#buscar');
+    await abrirTeclado(p);
+    await p.keyboard.type('tin');
+    comprobar((await foco(p)) === 'buscar' && (await p.locator('#lista-mov .fila').count()) === 9, 'el buscador funciona con el teclado abierto');
+    comprobar(await p.isHidden('#pestanas') && await p.isHidden('#agregar'), 'con el teclado abierto se esconden las pestañas y el botón +');
+    await p.setViewportSize({ width: 600, height: 400 });
+    await p.waitForTimeout(450);
+    comprobar((await foco(p)) === 'buscar', 'girar el teléfono mientras se escribe no quita el foco');
+    await p.evaluate(() => document.activeElement.blur());
+    await cerrarTeclado(p);
+    comprobar(await p.isVisible('#pestanas') && (await p.inputValue('#buscar')) === 'tin', 'al cerrar el teclado vuelven las pestañas');
     await p.fill('#buscar', '');
     await p.click('[data-accion=filtro-cat][data-id=arriendo]');
     comprobar((await p.locator('#lista-mov .fila').count()) === 1, 'filtra por categoría');
@@ -345,7 +425,7 @@ async function principal() {
 
     await p.click('[data-accion=ver-capacidad]');
     await esperarVista(p, 'capacidad');
-    comprobar((await p.inputValue('#k-ingresos')) === '$2.150.000' && (await p.inputValue('#k-financieros')) === '$410.000',
+    comprobar((await p.inputValue('#k-ingresos')) === '$2.000.000' && (await p.inputValue('#k-financieros')) === '$410.000',
       'el simulador de crédito toma los ingresos y las cuotas registradas');
     comprobar((await p.locator('.producto').count()) === 4, 'estima la viabilidad de cada tipo de crédito');
     await captura(p, 'capacidad', true);
@@ -436,6 +516,60 @@ async function principal() {
     await mes.pagina.reload();
     await mes.pagina.waitForFunction(() => window.Platica && Platica.listo);
     comprobar((await vista(mes.pagina)) === 'inicio', 'el resumen automático aparece una sola vez');
+
+    // ---------- ingresos variables ----------
+    const vari = await abrir(navegador, url);
+    const pv = vari.pagina;
+    await pv.click('[data-accion=bienvenida-siguiente]');
+    await pv.fill('#b-nombre', 'Laura');
+    await pv.fill('#b-promedio', '1800000');
+    await pv.click('#form-bienvenida button[type=submit]');
+    await esperarVista(pv, 'inicio');
+    let ev = await estado(pv);
+    comprobar(JSON.stringify(ev.perfil.periodos) === JSON.stringify([{ desde: '2026-10', tipo: 'variable', monto: 0 }]) && ev.perfil.ingresoAproximado === 1800000,
+      'sin salario fijo guarda ingresos variables');
+    comprobar(await pv.isVisible('text=¿Cuánto has recibido en octubre?') && await pv.isVisible('.cifra:has-text("sin registrar")'),
+      'con ingresos variables pide anotar lo recibido en el mes');
+    comprobar((await pv.evaluate(() => Platica.recordatorios().map((r) => r.id))).includes('ingresos-2026-10-20'), 'recuerda anotar los ingresos del mes');
+    await captura(pv, 'variable');
+    await pv.click('.banner [data-accion=nuevo-ingreso]');
+    await esperarVista(pv, 'ingreso');
+    comprobar(!(await pv.isVisible('[data-clase]')), 'con ingresos variables no hay salario que ajustar');
+    await pv.fill('#i-monto', '900000');
+    await pv.click('[data-concepto="Quincena"]');
+    await pv.click('#form-ingreso button[type=submit]');
+    await esperarVista(pv, 'inicio');
+    comprobar(!(await pv.isVisible('text=¿Cuánto has recibido en octubre?')) && await pv.isVisible('.cifra:has-text("1 registro"):has-text("$900.000")'),
+      'al anotar un ingreso desaparece el aviso');
+    comprobar(!(await pv.evaluate(() => Platica.recordatorios().map((r) => r.id))).includes('ingresos-2026-10-20'), 'ya no recuerda anotar los ingresos de este mes');
+    // Pasar a salario fijo a mitad de mes: lo ya anotado no se cuenta dos veces.
+    await pv.click('[data-accion=pestana][data-p=mas]');
+    await pv.click('[data-accion=ver-perfil]');
+    await esperarVista(pv, 'perfil');
+    await pv.click('label.interruptor:has(#pf-fijo)');
+    await pv.fill('#pf-salario', '2500000');
+    await pv.click('#form-perfil button[type=submit]');
+    comprobar(await pv.isVisible('#dialogo:has-text("¿Eran parte de tu salario?")'), 'al pasar a salario fijo pregunta por lo ya anotado');
+    await pv.click('#dialogo [data-r=si]');
+    await esperarVista(pv, 'mas');
+    ev = await estado(pv);
+    comprobar(ev.ingresos.length === 0 && JSON.stringify(ev.perfil.periodos) === JSON.stringify([{ desde: '2026-10', tipo: 'fijo', monto: 2500000 }]),
+      'pasa a salario fijo sin contar el salario dos veces');
+    await pv.click('[data-accion=pestana][data-p=inicio]');
+    comprobar(await pv.isVisible('.cifra:has-text("salario fijo"):has-text("$2.500.000")'), 'el inicio cuenta el salario fijo nuevo');
+    // Y de vuelta a variables: ofrece anotar el salario de este mes.
+    await pv.click('[data-accion=pestana][data-p=mas]');
+    await pv.click('[data-accion=ver-perfil]');
+    await esperarVista(pv, 'perfil');
+    await pv.click('label.interruptor:has(#pf-fijo)');
+    await pv.click('#form-perfil button[type=submit]');
+    comprobar(await pv.isVisible('#dialogo:has-text("¿Ya recibiste el salario de octubre?")'), 'al pasar a ingresos variables pregunta por el salario del mes');
+    await pv.click('#dialogo [data-r=si]');
+    await esperarVista(pv, 'mas');
+    ev = await estado(pv);
+    comprobar(ev.ingresos.length === 1 && ev.ingresos[0].monto === 2500000 && JSON.stringify(ev.perfil.periodos) === JSON.stringify([{ desde: '2026-10', tipo: 'variable', monto: 0 }]),
+      'anota el salario del mes al pasar a ingresos variables');
+    comprobar(vari.errores.length === 0, 'los ingresos variables no dejan errores');
 
     // ---------- aviso de versión nueva ----------
     // Se simula el APK 1.0 instalado y un version.json publicado con la 1.1.

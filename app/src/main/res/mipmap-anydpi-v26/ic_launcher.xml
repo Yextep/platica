@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Ícono adaptable (Android 8 o posterior): el lanzador recorta el fondo con su forma y la moneda queda en la zona segura. -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@color/icono_fondo" />
+    <foreground android:drawable="@drawable/ic_launcher_frente" />
+</adaptive-icon>
