@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Platica</string>
+    <string name="canal_recordatorios">Recordatorios</string>
+    <string name="canal_descripcion">Cuotas por vencer, registro de gastos y resumen del mes</string>
+</resources>

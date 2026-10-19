@@ -1,0 +1,8 @@
+{
+  "version": "1.0",
+  "codigo": 1,
+  "apk": "https://github.com/Yextep/platica/releases/download/v1.0/Platica.apk",
+  "notas": "Primera versión: gastos, ingresos, resumen mensual, deudas y vida crediticia.",
+  "codigo_minimo": 0,
+  "usura": { "ea": 28.59, "vigencia": "2026-10" }
+}

@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="es-CO">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <!-- Solo se ejecuta el código de la app y solo se consulta version.json en GitHub. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://raw.githubusercontent.com; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>Platica</title>
+  <link rel="stylesheet" href="estilos.css">
+</head>
+<body>
+  <div id="app">
+    <main id="vista" tabindex="-1"></main>
+    <button type="button" id="agregar" class="fab" data-accion="nuevo-gasto" aria-label="Registrar un gasto"></button>
+    <nav id="pestanas" aria-label="Secciones"></nav>
+  </div>
+  <section id="hoja" hidden></section>
+  <div id="dialogo" hidden></div>
+  <div id="aviso" role="status" aria-live="polite"></div>
+  <div id="tooltip" role="tooltip" hidden></div>
+  <script src="motor.js"></script>
+  <script src="graficas.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

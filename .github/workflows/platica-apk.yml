@@ -1,0 +1,110 @@
+name: Compilar Platica
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - 'docs/**'
+      - 'README.md'
+      # Lo cambia scripts/publicar_version.py al publicar un APK ya compilado.
+      - 'version.json'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: platica-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Preparar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+      - name: Preparar Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platforms;android-35 build-tools;35.0.0'
+          log-accepted-android-sdk-licenses: false
+      - name: Preparar Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Probar los cálculos
+        run: node --test pruebas/
+      - name: Probar la interfaz en Chromium
+        run: |
+          npm install --no-save --no-package-lock playwright@1.63.0
+          npx playwright install --with-deps chromium
+          sudo apt-get install -y -q fonts-roboto
+          node scripts/prueba_navegador.cjs
+      - name: Compilar APK
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon assembleRelease assembleDebug assembleDebugAndroidTest
+      - name: Liberar espacio para el emulador
+        # El emulador necesita más de 7 GB libres para su partición de datos.
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h "$HOME"
+      - name: Preparar aceleración del emulador
+        run: sudo chmod 666 /dev/kvm
+      - name: Probar Platica en Android
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim
+          script: bash scripts/android_smoke.sh
+      - name: Firmar APK de Platica
+        env:
+          PLATICA_SIGNING_KEYSTORE: ${{ secrets.PLATICA_SIGNING_KEYSTORE }}
+          PLATICA_SIGNING_PASSWORD: ${{ secrets.PLATICA_SIGNING_PASSWORD }}
+        run: |
+          python3 - <<'PY'
+          import base64, os
+          from pathlib import Path
+          key = Path(os.environ['RUNNER_TEMP']) / 'platica.p12'
+          key.write_bytes(base64.b64decode(os.environ['PLATICA_SIGNING_KEYSTORE']))
+          key.chmod(0o600)
+          PY
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign \
+            --ks "$RUNNER_TEMP/platica.p12" --ks-key-alias platica \
+            --ks-pass env:PLATICA_SIGNING_PASSWORD --key-pass env:PLATICA_SIGNING_PASSWORD \
+            --out app/build/outputs/apk/release/Platica.apk \
+            app/build/outputs/apk/release/app-release-unsigned.apk
+          "$ANDROID_HOME/build-tools/35.0.0/apksigner" verify --print-certs app/build/outputs/apk/release/Platica.apk
+          rm "$RUNNER_TEMP/platica.p12"
+      - name: Guardar APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Platica-APK
+          path: app/build/outputs/apk/release/Platica.apk
+          if-no-files-found: error
+      - name: Guardar resultados de las pruebas
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Platica-pruebas
+          path: |
+            app/build/reports/androidTests/
+            app/build/outputs/androidTest-results/
+          if-no-files-found: ignore
+      - name: Guardar vistas de Platica
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Platica-vistas
+          path: docs/*.png
+          if-no-files-found: ignore
