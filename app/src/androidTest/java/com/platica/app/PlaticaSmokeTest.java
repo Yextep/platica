@@ -151,16 +151,45 @@ public class PlaticaSmokeTest {
         return false;
     }
 
+    // En el emulador de GitHub a veces queda encima un aviso del sistema («Pixel Launcher isn't responding»)
+    // que se queda con los toques: se espera a que la ventana de la app tenga el foco.
+    private void esperarVentana(ActivityScenario<MainActivity> escenario) throws Exception {
+        for (int i = 0; i < 30; i++) {
+            AtomicBoolean foco = new AtomicBoolean(false);
+            escenario.onActivity(actividad -> foco.set(actividad.hasWindowFocus()));
+            if (foco.get()) return;
+            shell("am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS");
+            Thread.sleep(1000);
+        }
+        fail("Una ventana del sistema sigue encima de la app");
+    }
+
+    // Toca un campo como una persona: si el emulador no abre el teclado al primer toque, lo vuelve a tocar.
+    private void tocarCampo(ActivityScenario<MainActivity> escenario, String id) throws Exception {
+        for (int intento = 0; intento < 3; intento++) {
+            esperarVentana(escenario);
+            tocar(escenario, "#" + id);
+            if (esperar(escenario, "!!document.activeElement && document.activeElement.id === '" + id + "'", 5)
+                    && esperarTeclado(escenario, 8)) return;
+        }
+        fail("No se abrió el teclado al tocar #" + id);
+    }
+
     // En la 1.0, al abrirse el teclado la página se redibujaba, el campo perdía el foco y el teclado se cerraba enseguida.
     @Test
     public void escribeConElTecladoSinQueSeCierre() throws Exception {
         shell("settings put secure show_ime_with_hard_keyboard 1");
+        // El lanzador del emulador suele quedarse sin responder y su aviso tapa la app; durante la prueba no hace falta.
+        shell("am force-stop com.google.android.apps.nexuslauncher");
+        shell("am force-stop com.android.launcher3");
+        shell("am broadcast -a android.intent.action.CLOSE_SYSTEM_DIALOGS");
+        Thread.sleep(2000);
         try (ActivityScenario<MainActivity> escenario = ActivityScenario.launch(MainActivity.class)) {
             exigir(escenario, LISTO + " && Platica.vista() === 'bienvenida'");
             evaluar(escenario, "document.querySelector('[data-accion=bienvenida-siguiente]').click()");
             exigir(escenario, "!!document.querySelector('#b-nombre')");
-            tocar(escenario, "#b-nombre");
-            assertTrue("No se abrió el teclado", esperarTeclado(escenario, 10));
+            tocarCampo(escenario, "b-nombre");
+            // En la 1.0 el teclado se cerraba a los pocos milisegundos de abrirse.
             Thread.sleep(1500);
             assertTrue("El teclado se cerró solo", tecladoVisible(escenario));
             assertEquals("\"b-nombre\"", evaluar(escenario, "document.activeElement.id"));
@@ -170,9 +199,7 @@ public class PlaticaSmokeTest {
 
             tocar(escenario, "#b-fijo");
             exigir(escenario, "document.querySelector('#b-fijo').checked && !document.querySelector('#b-campo-salario').hidden");
-            tocar(escenario, "#b-salario");
-            exigir(escenario, "document.activeElement && document.activeElement.id === 'b-salario'");
-            assertTrue("No se abrió el teclado en el salario", esperarTeclado(escenario, 10));
+            tocarCampo(escenario, "b-salario");
             shell("input text 2500000");
             exigir(escenario, "document.querySelector('#b-salario').value === '$2.500.000'");
             Thread.sleep(1000);
@@ -184,10 +211,10 @@ public class PlaticaSmokeTest {
 
             // Un gasto escrito con el teclado.
             exigir(escenario, "!document.body.classList.contains('teclado')");
+            esperarVentana(escenario);
             tocar(escenario, "#agregar");
             exigir(escenario, "Platica.vista() === 'gasto' && !!document.querySelector('#g-monto')");
-            tocar(escenario, "#g-monto");
-            exigir(escenario, "document.activeElement && document.activeElement.id === 'g-monto'");
+            tocarCampo(escenario, "g-monto");
             shell("input text 45000");
             exigir(escenario, "document.querySelector('#g-monto').value === '$45.000'");
             Thread.sleep(800);
