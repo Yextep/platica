@@ -296,9 +296,12 @@ async function principal() {
     // Tooltip de la gráfica.
     await cerrarAvisos(p);
     await p.locator('.grafica .zona').first().evaluate((el) => el.scrollIntoView({ block: 'center' }));
+    // Desplazarse oculta el tooltip a propósito: se espera a que termine el desplazamiento antes de pasar el puntero.
+    await p.waitForTimeout(300);
     const zona = await p.locator('.grafica .zona').first().boundingBox();
     await p.mouse.move(zona.x + zona.width * 0.3, zona.y + 40);
-    comprobar(await p.isVisible('#tooltip:has-text("gastado hasta ese día")'), 'el tooltip de la línea muestra el acumulado');
+    comprobar(await p.waitForSelector('#tooltip:has-text("gastado hasta ese día")', { state: 'visible', timeout: 3000 }).then(() => true, () => false),
+      'el tooltip de la línea muestra el acumulado');
     await p.mouse.move(5, 5);
     await cerrarAvisos(p);
     await captura(p, 'inicio', true);
