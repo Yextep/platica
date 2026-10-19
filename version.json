@@ -1,9 +1,9 @@
 {
-  "version": "1.0",
-  "codigo": 1,
-  "apk": "https://github.com/Yextep/platica/releases/download/v1.0/Platica.apk",
-  "notas": "Primera versión: gastos por categorías, ingresos de cada mes, resumen mensual con gráficas y recomendaciones, deudas con plan de pagos y tu vida crediticia con diagnóstico, simuladores y recordatorios.",
-  "codigo_minimo": 0,
+  "version": "1.1",
+  "codigo": 2,
+  "apk": "https://github.com/Yextep/platica/releases/download/v1.1/Platica.apk",
+  "notas": "Arregla el teclado, que se cerraba apenas tocabas un campo. Nuevo: marca si tienes salario fijo (se cuenta solo cada mes, con primas y extras aparte) o ingresos variables (los anotas cada mes y la app te lo recuerda).",
+  "codigo_minimo": 2,
   "usura": {
     "ea": 28.59,
     "vigencia": "2026-10"
