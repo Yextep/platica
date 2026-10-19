@@ -1,8 +1,8 @@
 {
-  "version": "1.1",
-  "codigo": 2,
-  "apk": "https://github.com/Yextep/platica/releases/download/v1.1/Platica.apk",
-  "notas": "Arregla el teclado, que se cerraba apenas tocabas un campo. Nuevo: marca si tienes salario fijo (se cuenta solo cada mes, con primas y extras aparte) o ingresos variables (los anotas cada mes y la app te lo recuerda).",
+  "version": "1.2",
+  "codigo": 3,
+  "apk": "https://github.com/Yextep/platica/releases/download/v1.2/Platica.apk",
+  "notas": "Agrega créditos aunque no sepas la tasa: con lo prestado, la cuota y el número de cuotas Platica calcula el resto. Nuevos pagos fijos para suscripciones y planes del celular, y un resumen del mes con gastos, pagos fijos y deudas juntos.",
   "codigo_minimo": 2,
   "usura": {
     "ea": 28.59,
