@@ -70,6 +70,7 @@
   // Tasa de usura de crédito de consumo y ordinario (Superfinanciera). La app la actualiza desde version.json.
   const USURA = { ea: 28.59, vigencia: '2026-10' };
   const PAGO_GRANDE_HORMIGA = 20000;
+  const CAMPOS_ESTIMABLES = ['tasa', 'saldo', 'cuota', 'plazo', 'inicial'];
   // Se pagan una vez al mes: la proyección no los multiplica por el ritmo diario.
   const CATEGORIAS_FIJAS = new Set(['arriendo', 'servicios', 'deudas']);
 
@@ -204,7 +205,7 @@
 
   function estadoVacio() {
     return {
-      formato: 2,
+      formato: 3,
       // periodos: cómo son los ingresos desde cada mes ({ desde, tipo: 'fijo' | 'variable', monto }).
       // Cambiar de salario o de modalidad agrega un periodo nuevo, así los meses anteriores no cambian.
       perfil: { nombre: '', periodos: [], ingresoAproximado: 0, desde: '', configurado: false },
@@ -212,10 +213,13 @@
       ingresos: [],
       gastos: [],
       deudas: [],
+      // Pagos que se repiten cada mes (suscripciones, plan del celular, gimnasio): no son deudas, son gastos fijos.
+      fijos: [],
       puntajes: [],
       diagnostico: null,
       ajustes: {
         recordatorioCuotas: true, recordatorioDiario: false, horaDiario: '20:00', resumenMensual: true, recordatorioIngresos: true,
+        recordatorioFijos: true,
         usura: { ...USURA },
       },
       vistos: { resumen: '', notificaciones: false },
@@ -335,6 +339,11 @@
         cerradaFecha: esFecha(d.cerradaFecha) ? d.cerradaFecha : '',
         notas: texto(d.notas, 200),
         creada: esFecha(d.creada) ? d.creada : '',
+        // Crédito de cuota fija: cuándo se recibió y cuándo vence la primera cuota (de ahí salen el día de pago y las cuotas que van).
+        inicio: esFecha(d.inicio) ? d.inicio : '',
+        primera: esFecha(d.primera) ? d.primera : '',
+        // Valores que calculó Platica con lo que la persona sabía; se muestran como «calculados».
+        estimados: [...new Set((Array.isArray(d.estimados) ? d.estimados : []).filter((x) => CAMPOS_ESTIMABLES.includes(x)))],
         historial: (Array.isArray(d.historial) ? d.historial : [])
           .filter((h) => h && esFecha(h.fecha)).slice(-240)
           .map((h) => ({ fecha: h.fecha, saldo: entero(h.saldo, 0, 1e12) })),
@@ -342,15 +351,36 @@
     });
     const deudas = new Set(e.deudas.map((d) => d.id));
 
+    e.fijos = (Array.isArray(entrada.fijos) ? entrada.fijos : []).filter((f) => f && idValido(f.id) && esMes(f.desde)).slice(0, 200).map((f) => ({
+      id: f.id,
+      nombre: texto(f.nombre, 60) || 'Pago fijo',
+      monto: entero(f.monto, 1, 1e11),
+      categoria: categorias.has(f.categoria) ? f.categoria : 'servicios',
+      dia: entero(f.dia, 1, 31, 1),
+      medio: MEDIOS[f.medio] ? f.medio : '',
+      // Se cobra solo (débito automático): Platica registra el gasto el día del cobro. Si no, recuerda pagarlo.
+      automatico: f.automatico === true,
+      desde: f.desde,
+      // Último mes que se paga; vacío mientras siga activo.
+      fin: esMes(f.fin) && f.fin >= sumarMeses(f.desde, -1) ? f.fin : '',
+      // Meses en que no se cobró (por ejemplo, se borró el gasto que Platica había registrado solo).
+      omitidos: [...new Set((Array.isArray(f.omitidos) ? f.omitidos : []).filter(esMes))].slice(-60),
+      notas: texto(f.notas, 200),
+      creado: esFecha(f.creado) ? f.creado : '',
+    })).filter((f) => f.monto > 0);
+    const fijos = new Set(e.fijos.map((f) => f.id));
+
     e.gastos = (Array.isArray(entrada.gastos) ? entrada.gastos : []).filter((g) => g && idValido(g.id) && esFecha(g.fecha))
       .slice(-100000).map((g) => {
+        // sinGasto: pago de tarjeta cuyas compras ya se registraron como gastos; baja la deuda pero no se cuenta otra vez.
         const deuda = g.deuda && deudas.has(g.deuda.id)
-          ? { id: g.deuda.id, capital: entero(g.deuda.capital, -1e12, 1e12), interes: entero(g.deuda.interes, 0, 1e12) }
+          ? { id: g.deuda.id, capital: entero(g.deuda.capital, -1e12, 1e12), interes: entero(g.deuda.interes, 0, 1e12), sinGasto: g.deuda.sinGasto === true }
           : null;
         return {
           id: g.id, fecha: g.fecha, monto: entero(g.monto, 1, 1e11),
           categoria: categorias.has(g.categoria) ? g.categoria : 'personales',
           nota: texto(g.nota, 120), medio: MEDIOS[g.medio] ? g.medio : '', deuda,
+          fijo: !deuda && fijos.has(g.fijo) ? g.fijo : null,
         };
       }).filter((g) => g.monto > 0);
 
@@ -374,6 +404,7 @@
       horaDiario: typeof a.horaDiario === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(a.horaDiario) ? a.horaDiario : '20:00',
       resumenMensual: a.resumenMensual !== false,
       recordatorioIngresos: a.recordatorioIngresos !== false,
+      recordatorioFijos: a.recordatorioFijos !== false,
       usura: { ea: numero(usura.ea, 1, 200) || USURA.ea, vigencia: esMes(usura.vigencia) ? usura.vigencia : USURA.vigencia },
     };
     const v = entrada.vistos || {};
@@ -425,7 +456,10 @@
   }
 
   function resumenMes(estado, mes, ahora = new Date()) {
-    const gastos = estado.gastos.filter((g) => g.fecha.startsWith(mes));
+    const delMes = estado.gastos.filter((g) => g.fecha.startsWith(mes));
+    // Un pago de tarjeta cuyas compras ya estaban registradas baja la deuda, pero no se cuenta otra vez como gasto.
+    const gastos = delMes.filter((g) => !(g.deuda && g.deuda.sinGasto));
+    const pagosTarjeta = delMes.filter((g) => g.deuda && g.deuda.sinGasto);
     const ingreso = ingresoDelMes(estado, mes, ahora);
     const total = suma(gastos, 'monto');
     const dias = diasDelMes(mes);
@@ -439,7 +473,7 @@
     let conCredito = 0;
     let fijos = 0;
     for (const g of gastos) {
-      if (CATEGORIAS_FIJAS.has(g.categoria)) fijos += g.monto;
+      if (CATEGORIAS_FIJAS.has(g.categoria) || g.fijo || g.deuda) fijos += g.monto;
       const c = porCategoria.get(g.categoria) || { id: g.categoria, total: 0, cantidad: 0 };
       c.total += g.monto;
       c.cantidad += 1;
@@ -461,7 +495,12 @@
       acumulado.push(corrido);
     }
     // La proyección necesita al menos una semana de datos; solo los gastos variables siguen el ritmo diario.
-    const proyeccion = esActual && dia >= 7 && dia < dias ? Math.round(fijos + (total - fijos) / dia * dias) : total;
+    // Se suman las cuotas y los pagos fijos del mes que faltan por pagar.
+    const pendientes = esActual ? suma(pagosDelMes(estado, mes, ahora).filter((x) => x.estado !== 'pagado'), 'monto') : 0;
+    const base = esActual && dia >= 7 && dia < dias ? fijos + (total - fijos) / dia * dias : total;
+    const proyeccion = esActual && dia < dias ? Math.round(base + pendientes) : total;
+    const enFijos = suma(gastos.filter((g) => g.fijo), 'monto');
+    const enDeudas = suma(gastos.filter((g) => !g.fijo && g.categoria === 'deudas'), 'monto');
     return {
       mes, esActual, dias, dia, gastos, cantidad: gastos.length, total,
       ingresos: ingreso.total, ingresoFijo: ingreso.fijo, ingresoPendiente: ingreso.pendiente, salario: ingreso.salario,
@@ -474,6 +513,10 @@
       mayores: [...gastos].sort((a, b) => b.monto - a.monto).slice(0, 5),
       diaMayor: porDia.reduce((mejor, v, i) => (v > mejor.total ? { dia: i + 1, total: v } : mejor), { dia: 0, total: 0 }),
       abonosDeuda: suma(gastos.filter((g) => g.categoria === 'deudas'), 'monto'),
+      pendientes,
+      // Cómo salió la plata: gastos del día a día, pagos fijos y cuotas o abonos a deudas.
+      flujo: { diaADia: total - enFijos - enDeudas, fijos: enFijos, deudas: enDeudas, tarjeta: suma(pagosTarjeta, 'monto') },
+      pagosTarjeta,
     };
   }
 
@@ -636,6 +679,16 @@
           `Este mes ${r.esActual ? 'llevas' : 'gastaste'} ${pesos(c.total)}; tu promedio era de ${pesos(c.antes)}.`);
       }
     }
+    const vencidas = r.esActual ? pagosDelMes(estado, mes, ahora).filter((x) => x.estado === 'vencido') : [];
+    if (vencidas.length) {
+      agregar('vencidos', 'alerta', `${vencidas.length === 1 ? `${vencidas[0].nombre} venció` : `${vencidas.length} pagos vencieron`} sin registrarse`,
+        'Si ya los pagaste, regístralos para que tus cuentas cuadren. Si no, págalos cuanto antes: con las cuotas de deudas un atraso puede terminar en un reporte negativo.');
+    }
+    const gustosFijos = estado.fijos.filter((f) => fijoActivoEn(f, mes) && categoria(estado, f.categoria).tipo === 'deseo');
+    if (ing > 0 && gustosFijos.length >= 2 && suma(gustosFijos, 'monto') >= ing * 0.05) {
+      agregar('suscripciones', 'idea', `Tus suscripciones y gustos fijos suman ${pesos(suma(gustosFijos, 'monto'))} al mes`,
+        'Revisa cuáles usas de verdad: cancelar una que no aprovechas es un ahorro que se repite todos los meses.');
+    }
     if (r.total > 0 && r.conCredito / r.total > 0.15) {
       agregar('credito', 'idea', `Pagaste con tarjeta de crédito el ${porcentaje(r.conCredito / r.total)} de tus gastos`,
         'Si la usas, difiere a una sola cuota y paga el total antes de la fecha límite: así no pagas intereses. Actualiza su saldo en Deudas para que tu análisis de crédito siga al día.');
@@ -687,16 +740,244 @@
   function mesesParaPagar(saldo, i, cuota, limite = 600) {
     if (!(saldo > 0)) return { meses: 0, intereses: 0 };
     if (!(cuota > 0) || cuota <= saldo * i + 0.5) return { meses: Infinity, intereses: Infinity };
+    // Un residuo menor al 0,5% de la cuota es redondeo de la tasa, no un mes más.
+    const tolerancia = Math.max(0.5, cuota * 0.005);
     let s = saldo;
     let meses = 0;
     let intereses = 0;
-    while (s > 0.5 && meses < limite) {
+    while (s > tolerancia && meses < limite) {
       const interes = s * i;
       intereses += interes;
       s = s + interes - cuota;
       meses += 1;
     }
-    return meses >= limite && s > 0.5 ? { meses: Infinity, intereses: Infinity } : { meses, intereses };
+    return meses >= limite && s > tolerancia ? { meses: Infinity, intereses: Infinity } : { meses, intereses };
+  }
+
+  // ---------- créditos de cuota fija: completar lo que la persona no sabe ----------
+  // Tasa mensual con la que `cuota` durante `n` meses paga exactamente `monto` (bisección).
+  function tasaImplicita(monto, cuota, n) {
+    if (!(monto > 0) || !(cuota > 0) || !(n > 0) || cuota * n <= monto) return null;
+    let bajo = 0;
+    let alto = 1;
+    // Más del 100% mensual: los datos no cuadran.
+    if (valorPresente(cuota, alto, n) > monto) return null;
+    for (let k = 0; k < 100; k++) {
+      const medio = (bajo + alto) / 2;
+      if (valorPresente(cuota, medio, n) > monto) bajo = medio;
+      else alto = medio;
+    }
+    return (bajo + alto) / 2;
+  }
+  function plazoNecesario(monto, cuota, i) {
+    if (!(monto > 0) || !(cuota > 0)) return null;
+    if (!(i > 0)) return Math.ceil(monto / cuota - 1e-9);
+    if (cuota <= monto * i) return Infinity;
+    return Math.ceil(-Math.log(1 - monto * i / cuota) / Math.log(1 + i) - 1e-9);
+  }
+  // Saldo de capital después de pagar k cuotas.
+  function saldoTras(monto, i, cuota, k) {
+    if (!(k > 0)) return monto;
+    if (!(i > 0)) return Math.max(0, monto - cuota * k);
+    const f = Math.pow(1 + i, k);
+    return Math.max(0, monto * f - cuota * (f - 1) / i);
+  }
+  // Fecha de la cuota número `numero` (1 es la primera): el mismo día cada mes, ajustado en los meses cortos.
+  function fechaCuota(primera, numero) {
+    const dia = partes(primera).d;
+    const mes = sumarMeses(primera.slice(0, 7), numero - 1);
+    return `${mes}-${dos(Math.min(dia, diasDelMes(mes)))}`;
+  }
+  function cuotasVencidas(primera, n, referencia) {
+    if (!primera) return 0;
+    let k = 0;
+    while (k < n && k < 600 && fechaCuota(primera, k + 1) <= referencia) k += 1;
+    return k;
+  }
+  // Si no se sabe, la primera cuota se toma un mes después de recibir el crédito.
+  function primeraCuotaDe(inicio) {
+    return esFecha(inicio) ? fechaCuota(inicio, 2) : '';
+  }
+  // Con tres de monto, cuota, número de cuotas y tasa, calcula el que falta; y con la primera cuota,
+  // cuántas van y el saldo de hoy. `calculados` dice qué valores salieron de la cuenta y no de la persona.
+  function completarCredito(datos, referencia) {
+    const dada = datos.tasa && datos.tasa.valor > 0 ? tasaMensual(datos.tasa) : null;
+    let monto = datos.monto > 0 ? datos.monto : 0;
+    let cuota = datos.cuota > 0 ? datos.cuota : 0;
+    let plazo = datos.plazo > 0 ? datos.plazo : 0;
+    let i = dada;
+    const r = { completo: false, calculados: [], avisos: [] };
+    const conocidos = (monto > 0) + (cuota > 0) + (plazo > 0) + (dada != null);
+    if (conocidos < 3) {
+      r.faltan = 3 - conocidos;
+      return r;
+    }
+    if (!cuota) {
+      cuota = Math.round(cuotaFija(monto, i, plazo));
+      r.calculados.push('cuota');
+    } else if (!plazo) {
+      plazo = plazoNecesario(monto, cuota, i);
+      if (!isFinite(plazo)) {
+        r.avisos.push({ nivel: 'critico', texto: 'Con esa cuota no alcanzas a cubrir los intereses: la deuda nunca bajaría. Revisa la cuota o la tasa.' });
+        return r;
+      }
+      r.calculados.push('plazo');
+    } else if (!monto) {
+      monto = Math.round(valorPresente(cuota, i, plazo));
+      r.calculados.push('inicial');
+    } else if (dada == null) {
+      i = tasaImplicita(monto, cuota, plazo);
+      if (i == null) {
+        r.avisos.push({ nivel: 'critico', texto: cuota * plazo <= monto
+          ? `Con ${plazo} cuotas de ${pesos(cuota)} pagarías ${pesos(cuota * plazo)}, que no alcanza a cubrir lo que te prestaron. Revisa los datos.`
+          : 'Con esos valores el interés pasaría del 100% mensual. Revisa los datos.' });
+        return r;
+      }
+      r.calculados.push('tasa');
+    }
+    // Lo que de verdad cuesta el crédito: la tasa que corresponde a la cuota completa (incluye seguros y cargos si los hay).
+    const costo = tasaImplicita(monto, cuota, plazo);
+    r.iCosto = costo == null ? (i || 0) : costo;
+    // Si se dio la tasa y la cuota es mayor que la que da esa tasa, la diferencia suele ser seguros u otros cargos.
+    let cuotaCapital = cuota;
+    if (dada != null && conocidos === 4) {
+      const teorica = cuotaFija(monto, dada, plazo);
+      if (cuota - teorica > Math.max(1000, teorica * 0.01)) {
+        r.cargos = Math.round(cuota - teorica);
+        cuotaCapital = teorica;
+      } else if (teorica - cuota > Math.max(1000, teorica * 0.01)) {
+        r.avisos.push({ nivel: 'aviso', texto: `Con esa tasa la cuota sería de ${pesos(teorica)}, más de lo que escribiste. Revisa la tasa o la cuota.` });
+      }
+    }
+    r.monto = monto;
+    r.cuota = cuota;
+    r.plazo = plazo;
+    r.i = i || 0;
+    r.total = cuota * plazo;
+    r.intereses = r.total - monto;
+    r.primera = esFecha(datos.primera) ? datos.primera : '';
+    r.pagadas = datos.pagadas != null ? Math.max(0, Math.min(plazo, Math.round(datos.pagadas))) : cuotasVencidas(r.primera, plazo, referencia);
+    if (datos.pagadas == null) r.calculados.push('pagadas');
+    r.saldo = datos.saldo != null ? datos.saldo : Math.round(saldoTras(monto, r.i, cuotaCapital, r.pagadas));
+    if (datos.saldo == null) r.calculados.push('saldo');
+    r.restantes = plazo - r.pagadas;
+    r.fin = r.primera ? fechaCuota(r.primera, plazo) : '';
+    r.proxima = r.primera && r.pagadas < plazo ? fechaCuota(r.primera, r.pagadas + 1) : '';
+    r.completo = true;
+    return r;
+  }
+
+  // ---------- pagos fijos ----------
+  function fijoActivoEn(f, mes) {
+    return mes >= f.desde && (!f.fin || mes <= f.fin);
+  }
+  function fechaFijo(f, mes) {
+    return `${mes}-${dos(Math.min(f.dia, diasDelMes(mes)))}`;
+  }
+  function pagoDeFijo(estado, f, mes) {
+    return estado.gastos.find((g) => g.fijo === f.id && g.fecha.startsWith(mes)) || null;
+  }
+  // Los pagos fijos que se cobran solos y ya pasaron su fecha sin registrarse. Devuelve los gastos; no los agrega.
+  function cobrosAutomaticos(estado, ahora = new Date()) {
+    const ref = hoy(ahora);
+    const actual = mesActual(ahora);
+    const nuevos = [];
+    for (const f of estado.fijos) {
+      if (!f.automatico) continue;
+      let mes = f.desde < sumarMeses(actual, -23) ? sumarMeses(actual, -23) : f.desde;
+      for (; mes <= actual; mes = sumarMeses(mes, 1)) {
+        if (!fijoActivoEn(f, mes) || f.omitidos.includes(mes) || pagoDeFijo(estado, f, mes)) continue;
+        const fecha = fechaFijo(f, mes);
+        if (fecha > ref) continue;
+        nuevos.push({ id: idNuevo(), fecha, monto: f.monto, categoria: f.categoria, nota: f.nombre, medio: f.medio, deuda: null, fijo: f.id });
+      }
+    }
+    return nuevos;
+  }
+
+  // Lo que hay que pagar en un mes: las cuotas de las deudas y los pagos fijos, con su estado
+  // (pagado, hoy, pendiente o vencido; en meses pasados, «vencido» quiere decir sin pago registrado).
+  function pagosDelMes(estado, mes, ahora = new Date()) {
+    const ref = hoy(ahora);
+    const actual = mesActual(ahora);
+    const inicioMes = `${mes}-01`;
+    const estadoDe = (fecha, pagado) => (pagado ? 'pagado' : mes < actual || fecha < ref ? 'vencido' : fecha === ref ? 'hoy' : 'pendiente');
+    const lista = [];
+    for (const d of estado.deudas) {
+      if (d.codeudor || !d.diaPago) continue;
+      if (d.cerrada && d.cerradaFecha && d.cerradaFecha < inicioMes) continue;
+      const nace = d.primera ? d.primera.slice(0, 7) : d.apertura || (d.creada ? d.creada.slice(0, 7) : '');
+      if (nace && nace > mes) continue;
+      let fecha;
+      if (d.primera) {
+        const numero = mesesEntre(d.primera.slice(0, 7), mes) + 1;
+        if (numero < 1 || (d.plazo && numero > d.plazo)) continue;
+        fecha = fechaCuota(d.primera, numero);
+      } else {
+        fecha = `${mes}-${dos(Math.min(d.diaPago, diasDelMes(mes)))}`;
+      }
+      const pago = estado.gastos.filter((g) => g.deuda && g.deuda.id === d.id && diasEntre(g.fecha, fecha) <= 20 && diasEntre(fecha, g.fecha) <= 10)
+        .sort((a, b) => b.fecha.localeCompare(a.fecha))[0] || null;
+      if (!pago) {
+        // Las cuotas de antes de registrar la deuda en Platica se pagaron por fuera (y las cuotas pagadas ya están en el saldo);
+        // tampoco se cobra una deuda saldada.
+        if ((d.creada && fecha < d.creada) || (d.cerrada && d.cerradaFecha < fecha) || !(d.saldo > 0)) continue;
+      }
+      lista.push({ clase: 'cuota', id: d.id, nombre: d.nombre, monto: pago ? pago.monto : cuotaUsada(d, ahora).cuota, fecha, estado: estadoDe(fecha, !!pago), pago });
+    }
+    for (const f of estado.fijos) {
+      if (!fijoActivoEn(f, mes) || f.omitidos.includes(mes)) continue;
+      const fecha = fechaFijo(f, mes);
+      const pago = pagoDeFijo(estado, f, mes);
+      lista.push({ clase: 'fijo', id: f.id, nombre: f.nombre, monto: pago ? pago.monto : f.monto, fecha, estado: estadoDe(fecha, !!pago), pago,
+        automatico: f.automatico, categoria: f.categoria });
+    }
+    return lista.sort((a, b) => a.fecha.localeCompare(b.fecha) || a.nombre.localeCompare(b.nombre));
+  }
+
+  // Saldo de una deuda en una fecha según su historial (null si todavía no estaba registrada).
+  function saldoEn(d, fecha) {
+    const ordenado = [...d.historial].sort((a, b) => a.fecha.localeCompare(b.fecha));
+    let valor = null;
+    for (const h of ordenado) {
+      if (h.fecha > fecha) break;
+      valor = h.saldo;
+    }
+    if (valor == null && !d.historial.length && (!d.creada || d.creada <= fecha)) valor = d.saldo;
+    return valor;
+  }
+  // Las deudas en el resumen del mes: lo pagado (capital e intereses), las cuotas y cómo cambió la deuda total.
+  function resumenDeudas(estado, mes, ahora = new Date()) {
+    const actual = mesActual(ahora);
+    const anterior = sumarMeses(mes, -1);
+    const cierreAnterior = `${anterior}-${dos(diasDelMes(anterior))}`;
+    const cierre = mes === actual ? hoy(ahora) : `${mes}-${dos(diasDelMes(mes))}`;
+    const propias = estado.deudas.filter((d) => !d.codeudor);
+    const nace = (d) => (d.inicio ? d.inicio.slice(0, 7) : d.apertura);
+    // Al empezar el mes: el saldo que tenía. Si se registró en la app este mes pero ya existía, cuenta su primer saldo;
+    // si se adquirió este mes, empieza en cero (es deuda nueva).
+    const inicial = (d) => {
+      const antes = saldoEn(d, cierreAnterior);
+      if (antes != null) return antes;
+      if (nace(d) === mes) return 0;
+      const delMes = [...d.historial].filter((h) => h.fecha.startsWith(mes)).sort((a, b) => a.fecha.localeCompare(b.fecha))[0];
+      return delMes ? delMes.saldo : 0;
+    };
+    const pagos = estado.gastos.filter((g) => g.fecha.startsWith(mes) && (g.deuda || (g.categoria === 'deudas' && !g.fijo)))
+      .sort((a, b) => a.fecha.localeCompare(b.fecha));
+    const conDetalle = pagos.filter((g) => g.deuda);
+    return {
+      pagos,
+      total: suma(pagos, 'monto'),
+      capital: suma(conDetalle.map((g) => Math.max(0, g.deuda.capital))),
+      intereses: suma(conDetalle.map((g) => g.deuda.interes)),
+      sinDetalle: suma(pagos.filter((g) => !g.deuda), 'monto'),
+      cuotas: pagosDelMes(estado, mes, ahora).filter((x) => x.clase === 'cuota'),
+      saldoInicio: suma(propias.map(inicial)),
+      saldoFin: suma(propias.map((d) => saldoEn(d, cierre) || 0)),
+      terminadas: propias.filter((d) => d.cerrada && d.cerradaFecha.startsWith(mes)).map((d) => d.nombre),
+      nuevas: propias.filter((d) => nace(d) === mes).map((d) => d.nombre),
+    };
   }
 
   // ---------- deudas ----------
@@ -726,6 +1007,13 @@
   }
   function proximoPago(d, referencia) {
     if (!d.diaPago || d.cerrada) return '';
+    // Con la fecha de la primera cuota, las fechas salen de ahí y terminan con la última cuota.
+    if (d.primera) {
+      if (referencia <= d.primera) return d.primera;
+      const total = d.plazo || 600;
+      const vencidas = cuotasVencidas(d.primera, total, sumarDias(referencia, -1));
+      return vencidas < total ? fechaCuota(d.primera, vencidas + 1) : '';
+    }
     const mes = referencia.slice(0, 7);
     const enMes = (m) => fechaISO(...m.split('-').map(Number), Math.min(d.diaPago, diasDelMes(m)));
     const este = enMes(mes);
@@ -957,8 +1245,9 @@
         `Tu antigüedad promedio es de ${Math.round(ind.antiguedad)} meses. La experiencia solo crece con el tiempo: mantén abiertos y al día tus productos más viejos, con poco uso, y evita cancelar la tarjeta más antigua si no te cobra cuota de manejo alta.`);
     }
     for (const d of an.sobreUsura) {
-      agregar(`usura-${d.id}`, 'medio', `Revisa la tasa de ${d.nombre}`,
-        `Registraste ${decimal(tasaEA(d.tasa) * 100, 2)}% E.A., más que la tasa de usura (${decimal(estado.ajustes.usura.ea, 2)}% E.A.). Confírmala en tu extracto: cobrar por encima de la usura es ilegal y puedes quejarte ante la entidad y la Superintendencia Financiera.`);
+      agregar(`usura-${d.id}`, 'medio', `Revisa la tasa de ${d.nombre}`, d.estimados.includes('tasa')
+        ? `Con tu cuota, el costo de este crédito equivale a ${decimal(tasaEA(d.tasa) * 100, 1)}% E.A., más que la tasa de usura (${decimal(estado.ajustes.usura.ea, 2)}% E.A.). Puede incluir seguros, fianzas o comisiones además del interés: pide a la entidad el detalle de la tasa y de cada cargo. Si la tasa de interés sola supera la usura, puedes quejarte ante la Superintendencia Financiera.`
+        : `Registraste ${decimal(tasaEA(d.tasa) * 100, 2)}% E.A., más que la tasa de usura (${decimal(estado.ajustes.usura.ea, 2)}% E.A.). Confírmala en tu extracto: cobrar por encima de la usura es ilegal y puedes quejarte ante la entidad y la Superintendencia Financiera.`);
     }
     const orden = { alto: 0, medio: 1, bajo: 2 };
     return acciones.sort((a, b) => orden[a.impacto] - orden[b.impacto]);
@@ -1220,6 +1509,22 @@
           'Cuando te paguen, registra el valor en Platica. Si te pagan por partes, agrega cada pago.');
       }
     }
+    if (estado.ajustes.recordatorioFijos) {
+      const mes = mesActual(ahora);
+      for (const m of [mes, sumarMeses(mes, 1)]) {
+        for (const f of estado.fijos) {
+          if (!fijoActivoEn(f, m) || f.omitidos.includes(m) || pagoDeFijo(estado, f, m)) continue;
+          const fecha = fechaFijo(f, m);
+          if (f.automatico) {
+            agregar(`fijo-${f.id}-${m}`, aMilisegundos(sumarDias(fecha, -1), '19:00'), `Mañana se cobra ${f.nombre}`,
+              `${pesos(f.monto)}${f.medio ? ` en ${MEDIOS[f.medio]}` : ''}. Ten la plata disponible para que no quede pendiente.`);
+          } else {
+            agregar(`fijo-${f.id}-${m}`, aMilisegundos(fecha, '09:00'), `Hoy se paga ${f.nombre}`,
+              `${pesos(f.monto)}. Cuando lo pagues, márcalo en Platica.`);
+          }
+        }
+      }
+    }
     if (estado.ajustes.resumenMensual) {
       for (let i = 1; i <= 2; i++) {
         const mes = sumarMeses(mesActual(ahora), i);
@@ -1239,10 +1544,12 @@
       const segura = /^[=+\-@]/.test(s) ? `'${s}` : s;
       return /[;"\n]/.test(segura) ? `"${segura.replace(/"/g, '""')}"` : segura;
     };
-    const filas = [['Fecha', 'Tipo', 'Categoría', 'Monto', 'Medio de pago', 'Nota', 'Deuda']];
+    const filas = [['Fecha', 'Tipo', 'Categoría', 'Monto', 'Medio de pago', 'Nota', 'Deuda', 'Pago fijo']];
     for (const g of [...estado.gastos].sort((a, b) => a.fecha.localeCompare(b.fecha))) {
       const deuda = g.deuda ? (estado.deudas.find((d) => d.id === g.deuda.id) || {}).nombre : '';
-      filas.push([g.fecha, 'Gasto', categoria(estado, g.categoria).nombre, g.monto, MEDIOS[g.medio] || '', g.nota, deuda || '']);
+      const fijo = g.fijo ? (estado.fijos.find((f) => f.id === g.fijo) || {}).nombre : '';
+      filas.push([g.fecha, g.deuda && g.deuda.sinGasto ? 'Pago de tarjeta (compras ya registradas)' : 'Gasto',
+        categoria(estado, g.categoria).nombre, g.monto, MEDIOS[g.medio] || '', g.nota, deuda || '', fijo || '']);
     }
     const ingresos = estado.ingresos.map((i) => [i.fecha, 'Ingreso', i.tipo === 'salario' ? `${i.concepto} (salario del mes)` : i.concepto, i.monto]);
     // El salario fijo no se guarda mes a mes: se agrega a la exportación cada mes que se contó.
@@ -1252,7 +1559,7 @@
         if (ing.fijo && !ing.ajuste && ing.salario) ingresos.push([`${mes}-01`, 'Ingreso', 'Salario fijo', ing.salario]);
       }
     }
-    for (const fila of ingresos.sort((a, b) => a[0].localeCompare(b[0]))) filas.push([...fila, '', '', '']);
+    for (const fila of ingresos.sort((a, b) => a[0].localeCompare(b[0]))) filas.push([...fila, '', '', '', '']);
     // Excel en español separa columnas con punto y coma; el BOM hace que lea bien las tildes.
     return '﻿' + filas.map((f) => f.map(celda).join(';')).join('\r\n') + '\r\n';
   }
@@ -1262,7 +1569,11 @@
     const lineas = [`Mi resumen de ${mesSolo(mes)} ${mes.slice(0, 4)} (Platica)`, ''];
     lineas.push(`Ingresos: ${pesos(r.ingresos)}${r.ingresoFijo ? (r.extras.length ? ' (salario fijo y extras)' : ' (salario fijo)') : r.ingresoPendiente ? ' (sin registrar)' : ''}`);
     lineas.push(`Gastos: ${pesos(r.total)} en ${r.cantidad} ${r.cantidad === 1 ? 'pago' : 'pagos'}`);
+    if (r.flujo.fijos) lineas.push(`  · Pagos fijos: ${pesos(r.flujo.fijos)}`);
+    if (r.flujo.deudas) lineas.push(`  · Cuotas y abonos a deudas: ${pesos(r.flujo.deudas)}`);
     lineas.push(`${r.disponible >= 0 ? 'Me quedó' : 'Me faltó'}: ${pesos(Math.abs(r.disponible))}`);
+    const rd = resumenDeudas(estado, mes, ahora);
+    if (rd.saldoInicio || rd.saldoFin) lineas.push(`Deuda total: ${pesos(rd.saldoInicio)} al empezar el mes, ${pesos(rd.saldoFin)} al terminar`);
     if (r.porCategoria.length) {
       lineas.push('', 'Por categoría:');
       for (const c of r.porCategoria) lineas.push(`• ${categoria(estado, c.id).nombre}: ${pesos(c.total)} (${porcentaje(c.pct)})`);
@@ -1279,6 +1590,8 @@
     idNuevo, estadoVacio, normalizarEstado, categoria,
     ingresosDe, ingresoDelMes, ingresoReferencia, periodoDe, esFijo, normalizarPeriodos, resumenMes, historialMeses, reparto, recomendacionesMes, gastosBasicos,
     tasaMensual, tasaEA, eaAMensual, cuotaFija, valorPresente, tablaAmortizacion, mesesParaPagar,
+    tasaImplicita, plazoNecesario, saldoTras, fechaCuota, cuotasVencidas, primeraCuotaDe, completarCredito,
+    fijoActivoEn, fechaFijo, pagoDeFijo, cobrosAutomaticos, pagosDelMes, saldoEn, resumenDeudas,
     grupoDe, esRotativa, activas, cuotasMensuales, cuotaUsada, proximoPago, pagosDe, repartoPago, proyeccionDeuda,
     pctPagado, planPagos, plazoRestante,
     analisisCredito, factoresEstimados, bandaPuntaje, indicadores, planPuntaje, textosDiagnostico, ultimoPuntaje,

@@ -100,22 +100,57 @@ async function registrarGasto(p, { monto, categoria, nota, medio, fecha }) {
   await p.waitForFunction(() => Platica.vista() !== 'gasto');
 }
 
-async function agregarDeuda(p, d) {
+async function registrarGastoFijo(p) {
+  await p.click('#agregar');
+  await esperarVista(p, 'gasto');
+  await p.fill('#g-monto', '55000');
+  await p.click('[data-cat="servicios"]');
+  await p.fill('#g-fecha', '2026-10-05');
+  await p.click('[data-medio="nequi"]');
+  await p.fill('#g-nota', 'Plan Claro');
+  await p.click('label.interruptor:has(#g-repetir)');
+  await p.click('#form-gasto button[type=submit]');
+  await p.waitForFunction(() => Platica.vista() !== 'gasto');
+}
+async function nuevoFijo(p, f) {
+  await p.click('[data-accion=nuevo-fijo]');
+  await esperarVista(p, 'fijoForm');
+  await p.fill('#f-monto', f.monto);
+  if (f.sugerencia) await p.click(`[data-sug="${f.sugerencia}"]`);
+  if (f.nombre) await p.fill('#f-nombre', f.nombre);
+  await p.fill('#f-dia', f.dia);
+  await p.click(`[data-auto="${f.automatico ? 1 : 0}"]`);
+  if (f.yaPagado === false && await p.isVisible('#f-ya-campo')) await p.click('label.interruptor:has(#f-ya)');
+  await p.click('#form-fijo button[type=submit]');
+  await esperarVista(p, 'fijo');
+}
+async function abrirFormDeuda(p) {
   await p.evaluate(() => document.querySelector('[data-accion="nueva-deuda"]').click());
   await esperarVista(p, 'deudaForm');
+}
+// Tarjetas y rotativos piden cupo y saldo; los créditos de cuota fija, lo que se sepa (Platica calcula el resto).
+async function agregarDeuda(p, d) {
+  await abrirFormDeuda(p);
   await p.selectOption('#d-tipo', d.tipo);
   await p.fill('#d-nombre', d.nombre);
   if (d.entidad) await p.fill('#d-entidad', d.entidad);
-  await p.fill('#d-inicial', String(d.inicial));
-  await p.fill('#d-saldo', String(d.saldo));
-  if (d.cuota) await p.fill('#d-cuota', String(d.cuota));
-  if (d.dia) await p.fill('#d-dia', String(d.dia));
+  if (d.tipo === 'tarjeta' || d.tipo === 'rotativo') {
+    await p.fill('#d-cupo', String(d.inicial));
+    await p.fill('#d-saldo-rot', String(d.saldo));
+    if (d.cuota) await p.fill('#d-minimo', String(d.cuota));
+    if (d.dia) await p.fill('#d-dia', String(d.dia));
+    if (d.apertura) await p.fill('#d-apertura', d.apertura);
+  } else {
+    if (d.inicial) await p.fill('#d-monto', String(d.inicial));
+    if (d.cuota) await p.fill('#d-cuota', String(d.cuota));
+    if (d.plazo) await p.fill('#d-plazo', String(d.plazo));
+    if (d.inicio) await p.fill('#d-inicio', d.inicio);
+    if (d.saldo) await p.fill('#d-saldo', String(d.saldo));
+  }
   if (d.tasa) {
     await p.fill('#d-tasa', d.tasa);
     await p.click(`[data-tasa="${d.tipoTasa || 'EA'}"]`);
   }
-  if (d.apertura) await p.fill('#d-apertura', d.apertura);
-  if (d.plazo) await p.fill('#d-plazo', String(d.plazo));
   await p.click('#form-deuda button[type=submit]');
   await esperarVista(p, 'deuda');
   await cerrarAvisos(p);
@@ -313,8 +348,8 @@ async function principal() {
       tasa: '18', tipoTasa: 'EA', apertura: '2026-10' });
     comprobar(await p.isVisible('text=Usas el 142% de tu cupo de $480.000'), 'la tarjeta muestra el uso del cupo');
     await p.click('[data-accion=atras]');
-    await agregarDeuda(p, { tipo: 'sector_real', nombre: 'Crédito almacén', inicial: 8959000, saldo: 4453000, cuota: 350000, dia: 10,
-      tasa: '1,9', tipoTasa: 'MV', apertura: '2025-09', plazo: 36 });
+    await agregarDeuda(p, { tipo: 'sector_real', nombre: 'Crédito almacén', inicial: 8959000, saldo: 4453000, cuota: 350000,
+      tasa: '1,9', tipoTasa: 'MV', inicio: '2025-09-10', plazo: 36 });
     comprobar(await p.isVisible('text=Has pagado el 50% de $8.959.000'), 'el crédito muestra cuánto se ha pagado');
     comprobar(await p.isVisible('text=Cuándo terminas de pagar'), 'proyecta cuándo se termina de pagar');
     await p.fill('#dd-extra', '100000');
@@ -570,6 +605,156 @@ async function principal() {
     comprobar(ev.ingresos.length === 1 && ev.ingresos[0].monto === 2500000 && JSON.stringify(ev.perfil.periodos) === JSON.stringify([{ desde: '2026-10', tipo: 'variable', monto: 0 }]),
       'anota el salario del mes al pasar a ingresos variables');
     comprobar(vari.errores.length === 0, 'los ingresos variables no dejan errores');
+
+    // ---------- crédito de cuota fija sin saber la tasa (el crédito móvil del usuario) ----------
+    const cred = await abrir(navegador, url);
+    const pc = cred.pagina;
+    await pc.click('[data-accion=bienvenida-siguiente]');
+    await pc.click('label.interruptor:has(#b-fijo)');
+    await pc.fill('#b-salario', '2500000');
+    await pc.click('#form-bienvenida button[type=submit]');
+    await esperarVista(pc, 'inicio');
+    await pc.click('[data-accion=pestana][data-p=deudas]');
+    await abrirFormDeuda(pc);
+    await pc.fill('#d-nombre', 'Crédito móvil');
+    await pc.fill('#d-monto', '2000000');
+    await pc.fill('#d-cuota', '220000');
+    comprobar(await pc.isVisible('#d-calculo:has-text("Escribe al menos tres")'), 'con dos datos pide un tercero');
+    await pc.fill('#d-plazo', '12');
+    await pc.fill('#d-inicio', '2026-10-08');
+    comprobar((await pc.inputValue('#d-primera')) === '2026-11-08', 'propone la primera cuota un mes después de recibir el crédito');
+    const calculo = await pc.textContent('#d-calculo');
+    comprobar(calculo.includes('4,55% M.V. · 70,6% E.A.') && calculo.includes('$2.640.000') && calculo.includes('$640.000') && calculo.includes('0 de 12')
+      && calculo.includes('$2.000.000') && calculo.includes('8 de octubre de 2027'), 'con monto, cuota y plazo calcula la tasa, el total, los intereses, el saldo y la última cuota');
+    comprobar(await pc.isVisible('#d-calculo .banner.critico:has-text("Este crédito cuesta 70,6% E.A.")'), 'avisa que el costo pasa la tasa de usura');
+    comprobar((await pc.getAttribute('#d-saldo', 'placeholder')) === '$2.000.000 (calculado)', 'el saldo vacío muestra el que calculó');
+    await captura(pc, 'deuda-calculo', true);
+    await pc.click('#form-deuda button[type=submit]');
+    await esperarVista(pc, 'deuda');
+    const movil = (await estado(pc)).deudas[0];
+    comprobar(movil.inicial === 2000000 && movil.cuota === 220000 && movil.plazo === 12 && movil.saldo === 2000000 && movil.tasa.tipo === 'MV'
+      && Math.abs(movil.tasa.valor - 4.5532) < 0.001 && movil.diaPago === 8 && movil.primera === '2026-11-08' && movil.inicio === '2026-10-08'
+      && movil.apertura === '2026-10' && movil.estimados.includes('tasa') && movil.estimados.includes('saldo'), 'guarda la deuda con lo calculado marcado como tal');
+    comprobar(await pc.isVisible('td:has-text("1 de 12")') && await pc.isVisible('td:has-text("$2.640.000")') && await pc.isVisible('text=Cuesta más que la tasa de usura')
+      && await pc.isVisible('.cifra:has-text("calculada")'), 'el detalle muestra en qué cuota va, el total y que la tasa es calculada');
+    await captura(pc, 'deuda-movil', true);
+    await pc.click('[data-accion=pagar-deuda]');
+    await esperarVista(pc, 'gasto');
+    comprobar((await pc.inputValue('#g-monto')) === '$220.000' && (await pc.inputValue('#g-saldo')) === '$1.871.064', 'el pago de la cuota baja el capital según la tasa calculada');
+    await pc.click('#form-gasto button[type=submit]');
+    await esperarVista(pc, 'deuda');
+    await pc.click('[data-accion=atras]');
+    // Un plan pospago no es una deuda: el formulario lo dice.
+    await abrirFormDeuda(pc);
+    await pc.selectOption('#d-tipo', 'telecom');
+    comprobar(await pc.isVisible('#d-nota-telecom:has-text("pago fijo")'), 'si es un plan del celular, sugiere registrarlo como pago fijo');
+    await pc.click('[data-accion=atras]');
+    comprobar(await pc.isVisible('.banner:has-text("¿Suscripciones, plan del celular o gimnasio?")'), 'la pestaña de deudas explica dónde van las suscripciones');
+
+    // ---------- pagos fijos ----------
+    await pc.click('[data-accion=pestana][data-p=inicio]');
+    // Desde un gasto: «Es un pago fijo cada mes».
+    await registrarGastoFijo(pc);
+    let ec = await estado(pc);
+    const plan = ec.fijos.find((f) => f.nombre === 'Plan Claro');
+    comprobar(plan && plan.dia === 5 && plan.monto === 55000 && !plan.automatico && plan.desde === '2026-10' && ec.gastos.some((g) => g.fijo === plan.id && g.fecha === '2026-10-05'),
+      'un gasto se puede volver pago fijo y queda como el pago de ese mes');
+    // Desde la lista: uno que se cobra solo y aún no llega, y uno que se paga a mano y ya venció.
+    await pc.click('[data-accion=ver-fijos]');
+    comprobar((await vista(pc)) === 'movimientos' && await pc.isVisible('.fila:has-text("Plan Claro")'), 'los pagos fijos están en Movimientos → Fijos');
+    await nuevoFijo(pc, { monto: '26900', sugerencia: 'Streaming', dia: '25', automatico: true });
+    await pc.click('[data-accion=atras]');
+    await nuevoFijo(pc, { monto: '90000', nombre: 'Gimnasio', dia: '1', automatico: false, yaPagado: false });
+    await pc.click('[data-accion=atras]');
+    ec = await estado(pc);
+    const streaming = ec.fijos.find((f) => f.nombre === 'Streaming');
+    const gimnasio = ec.fijos.find((f) => f.nombre === 'Gimnasio');
+    comprobar(streaming.automatico && streaming.categoria === 'personales' && !gimnasio.automatico && !ec.gastos.some((g) => g.fijo === gimnasio.id),
+      'crea pagos fijos que se cobran solos o que se pagan a mano');
+    await captura(pc, 'fijos', true);
+    await pc.click('[data-accion=pestana][data-p=inicio]');
+    const tarjetaPagos = await pc.textContent('#pagos-mes');
+    comprobar(tarjetaPagos.includes('Gimnasio') && tarjetaPagos.includes('Vencido') && tarjetaPagos.includes('Plan Claro') && tarjetaPagos.includes('Pagado')
+      && tarjetaPagos.includes('Streaming') && tarjetaPagos.includes('Pendiente'), 'Inicio junta los pagos del mes con su estado');
+    comprobar(await pc.isVisible('#por-pagar:has-text("Faltan $116.900")'), 'Inicio dice cuánto falta por pagar este mes');
+    comprobar(await pc.isVisible('.reco:has-text("Gimnasio venció sin registrarse")'), 'avisa del pago fijo vencido');
+    await captura(pc, 'inicio-pagos', true);
+    await pc.click('#pagos-mes .fila:has-text("Gimnasio")');
+    await esperarVista(pc, 'gasto');
+    comprobar((await pc.inputValue('#g-monto')) === '$90.000' && (await pc.inputValue('#g-nota')) === 'Gimnasio' && await pc.isVisible('#g-fijo .banner:has-text("Gimnasio")'),
+      'pagar un pago fijo abre el gasto ya lleno');
+    await pc.click('#form-gasto button[type=submit]');
+    await esperarVista(pc, 'inicio');
+    comprobar(await pc.isVisible('#pagos-mes .fila:has-text("Gimnasio"):has-text("Pagado")'), 'al pagarlo queda como pagado');
+    // El 26 de octubre se registra solo el que se cobra solo.
+    await pc.clock.setFixedTime(new Date('2026-10-26T12:00:00-05:00'));
+    await pc.reload();
+    await pc.waitForFunction(() => window.Platica && Platica.listo);
+    ec = await estado(pc);
+    const cobro = ec.gastos.find((g) => g.fijo === streaming.id);
+    comprobar(cobro && cobro.fecha === '2026-10-25' && cobro.monto === 26900 && await pc.isVisible('text=Se registró Streaming ($26.900), que se cobra solo.'),
+      'el pago que se cobra solo se registra el día del cobro');
+    // Si se borra (no se cobró), ese mes no se vuelve a registrar.
+    await pc.click('[data-accion=pestana][data-p=movimientos]');
+    await pc.click('[data-accion=modo-mov][data-m=gastos]');
+    await pc.click(`#lista-mov [data-id="${cobro.id}"]`);
+    await pc.click('[data-accion=eliminar-gasto]');
+    await pc.click('#dialogo [data-r=si]');
+    await pc.reload();
+    await pc.waitForFunction(() => window.Platica && Platica.listo);
+    ec = await estado(pc);
+    comprobar(!ec.gastos.some((g) => g.fijo === streaming.id) && ec.fijos.find((f) => f.id === streaming.id).omitidos.includes('2026-10'),
+      'si se borra un cobro automático, ese mes no se vuelve a registrar');
+    // Cancelar: los pagos de antes se quedan.
+    await pc.click('[data-accion=pestana][data-p=movimientos]');
+    await pc.click('[data-accion=modo-mov][data-m=fijos]');
+    await pc.click('.fila:has-text("Gimnasio")');
+    await esperarVista(pc, 'fijo');
+    await pc.click('[data-accion=cancelar-fijo]');
+    comprobar(await pc.isVisible('#dialogo:has-text("Ya no lo pago desde noviembre (octubre ya está pagado)")'), 'cancelar pregunta desde cuándo y respeta lo ya pagado');
+    await pc.click('#dialogo [data-r=este]');
+    ec = await estado(pc);
+    comprobar(ec.fijos.find((f) => f.id === gimnasio.id).fin === '2026-10' && ec.gastos.some((g) => g.fijo === gimnasio.id) && await pc.isVisible('[data-accion=reactivar-fijo]'),
+      'cancelar un pago fijo deja de contarlo desde el mes siguiente y conserva lo pagado');
+    await pc.click('[data-accion=atras]');
+
+    // ---------- pago de tarjeta cuyas compras ya están en los gastos ----------
+    await pc.click('[data-accion=pestana][data-p=deudas]');
+    await agregarDeuda(pc, { tipo: 'tarjeta', nombre: 'Visa', inicial: 1000000, saldo: 500000, cuota: 50000, dia: 28 });
+    await pc.click('[data-accion=atras]');
+    await pc.click('[data-accion=pestana][data-p=inicio]');
+    await registrarGasto(pc, { monto: 100000, categoria: 'personales', nota: 'Zapatos', medio: 'credito' });
+    const antesPagoTarjeta = (await pc.evaluate(() => Platica.estado())).gastos.length;
+    await pc.click('[data-accion=pestana][data-p=deudas]');
+    await pc.click('.deuda:has-text("Visa")');
+    await pc.click('[data-accion=pagar-deuda]');
+    await esperarVista(pc, 'gasto');
+    await pc.fill('#g-monto', '200000');
+    comprobar(await pc.isVisible('#g-tarjeta:has-text("Este mes registraste $100.000 en compras con tarjeta")'), 'al pagar la tarjeta recuerda cuánto se registró en compras con ella');
+    await pc.click('label.interruptor:has(#g-sin-gasto)');
+    await pc.click('#form-gasto button[type=submit]');
+    await esperarVista(pc, 'deuda');
+    ec = await estado(pc);
+    const pagoVisa = ec.gastos[ec.gastos.length - 1];
+    comprobar(ec.gastos.length === antesPagoTarjeta + 1 && pagoVisa.deuda.sinGasto === true && ec.deudas.find((d) => d.nombre === 'Visa').saldo < 500000,
+      'el pago de la tarjeta baja la deuda y queda marcado para no contarse dos veces');
+    await pc.click('[data-accion=atras]');
+
+    // ---------- resumen del mes con todo junto ----------
+    await pc.click('[data-accion=pestana][data-p=inicio]');
+    await pc.click('[data-accion=ver-resumen]');
+    await esperarVista(pc, 'resumen');
+    const flujo = await pc.textContent('.flujo');
+    // 55.000 + 90.000 de pagos fijos; 220.000 de la cuota del crédito móvil; 100.000 de compras; el pago de la tarjeta no suma.
+    comprobar(flujo.includes('Ingresos+$2.500.000') && flujo.includes('Gastos del día a día−$100.000') && flujo.includes('Pagos fijos−$145.000')
+      && flujo.includes('Cuotas y abonos a deudas−$220.000') && flujo.includes('$2.035.000'), `el resumen junta gastos, pagos fijos y deudas: ${flujo}`);
+    comprobar(await pc.isVisible('text=Además pagaste $200.000 a tus tarjetas por compras que ya estaban en tus gastos'), 'el pago de la tarjeta se explica pero no se cuenta otra vez');
+    const deudasMes = await pc.textContent('section:has(h2:has-text("Tus deudas en octubre"))');
+    comprobar(deudasMes.includes('$420.000') && deudasMes.includes('Deuda total al empezar el mes') && deudasMes.includes('Crédito móvil'),
+      'el resumen trae lo pagado a las deudas, la deuda total y las cuotas');
+    comprobar(await pc.isVisible('section:has(h2:has-text("Pagos fijos")) .fila:has-text("Gimnasio")'), 'el resumen trae los pagos fijos del mes');
+    await captura(pc, 'resumen-completo', true);
+    comprobar(cred.errores.length === 0, `el crédito y los pagos fijos no dejan errores${cred.errores.length ? `: ${cred.errores.join(' | ')}` : ''}`);
 
     // ---------- aviso de versión nueva ----------
     // Se simula el APK 1.0 instalado y un version.json publicado con la 1.1.

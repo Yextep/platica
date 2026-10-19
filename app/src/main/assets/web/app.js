@@ -17,6 +17,8 @@
   const { pesos, porcentaje } = M;
   // En las cifras pequeñas, desde 10 millones se usa el formato corto para que quepan en una línea.
   const cifra = (v) => (Math.abs(v) >= 1e7 ? M.compacto(v) : pesos(v));
+  // «Unos $640.000»: las cifras aproximadas se redondean al mil.
+  const unos = (v) => Math.round(v / 1000) * 1000;
   const plural = (n, uno, varios) => `${n.toLocaleString('es-CO')} ${n === 1 ? uno : varios}`;
 
   // ---------- íconos (trazos de 24×24) ----------
@@ -193,6 +195,9 @@
     if (pestana === 'deudas') {
       fab.dataset.accion = 'nueva-deuda';
       fab.setAttribute('aria-label', 'Agregar una deuda');
+    } else if (pestana === 'movimientos' && filtro.modo === 'fijos') {
+      fab.dataset.accion = 'nuevo-fijo';
+      fab.setAttribute('aria-label', 'Agregar un pago fijo');
     } else {
       fab.dataset.accion = 'nuevo-gasto';
       fab.setAttribute('aria-label', 'Registrar un gasto');
@@ -325,7 +330,7 @@
       };
       d.onclick = (ev) => {
         const b = ev.target.closest('[data-r]');
-        if (b) dialogoAbierto(b.dataset.r === 'si' ? alResolver(d) : null);
+        if (b) dialogoAbierto(b.dataset.r === 'si' ? alResolver(d) : b.dataset.r === 'no' ? null : b.dataset.r);
         else if (ev.target === d) dialogoAbierto(null);
       };
       const foco = $('input', d) || $('[data-r=si]', d);
@@ -343,6 +348,12 @@
       <div class="botones"><button type="button" class="boton" data-r="no">${esc(no)}</button>
       <button type="button" class="boton ${peligro ? 'peligro lleno' : 'primario'}" data-r="si">${esc(si)}</button></div>`, () => true)
       .then((v) => v === true);
+  }
+  // Un diálogo con varias opciones: devuelve el valor de la elegida, o null con «Volver».
+  function elegir({ titulo, texto, opciones }) {
+    return abrirDialogo(`<h2 id="dlg-titulo">${esc(titulo)}</h2>${texto ? `<p>${esc(texto)}</p>` : ''}
+      <div class="opciones">${opciones.map((o) => `<button type="button" class="boton ancho ${o.clase || 'borde'}" data-r="${esc(o.valor)}">${esc(o.texto)}</button>`).join('')}
+      <button type="button" class="boton ancho" data-r="no">Volver</button></div>`, () => null);
   }
   function pedirMonto({ titulo, texto, valor }) {
     return abrirDialogo(`<form><h2 id="dlg-titulo">${esc(titulo)}</h2>${texto ? `<p>${esc(texto)}</p>` : ''}
@@ -468,6 +479,9 @@
       html += `<div class="medidor ${clase}" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct * 100)}" aria-label="Parte de tus ingresos que ya gastaste">
         <span style="width:${Math.min(100, pct * 100)}%"></span></div>
         <div class="medidor-texto"><span>Gastaste el ${porcentaje(pct)} de tus ingresos</span>${r.esActual ? `<span>Día ${r.dia} de ${r.dias}</span>` : ''}</div>`;
+      if (r.esActual && r.pendientes > 0) {
+        html += `<p class="nota" id="por-pagar">Faltan ${pesos(r.pendientes)} en cuotas y pagos fijos de este mes. Después de pagarlos te ${r.disponible - r.pendientes >= 0 ? `quedarían ${pesos(r.disponible - r.pendientes)}` : `faltarían ${pesos(r.pendientes - r.disponible)}`}.</p>`;
+      }
     }
     html += `<div class="cifras">
         <button type="button" class="cifra editable" data-accion="ver-ingresos"><span>Ingresos${icono('lapiz', 'mini')}</span><strong>${cifra(r.ingresos)}</strong><small>${detalleIngresos(r)}</small></button>
@@ -497,12 +511,13 @@
       html += `<section class="tarjeta"><div class="cabecera-tarjeta"><h2>Recomendaciones</h2>${recos.length > 3 ? `<button type="button" class="enlace" data-accion="ver-recomendaciones">Ver ${recos.length}</button>` : ''}</div>
         ${recos.slice(0, 3).map(recoHtml).join('')}</section>`;
     }
-    const proximos = proximosPagos(10);
-    if (proximos.length) {
-      html += `<section class="tarjeta"><div class="cabecera-tarjeta"><h2>Próximas cuotas</h2><button type="button" class="enlace" data-accion="pestana" data-p="deudas">Ver deudas</button></div>
-        <div class="lista">${proximos.map((p) => `<button type="button" class="fila" data-accion="ver-deuda" data-id="${esc(p.deuda.id)}">
-          ${iconoCat({ color: 4, icono: 'tarjeta' })}<span class="centro"><strong>${esc(p.deuda.nombre)}</strong><small>Vence ${esc(M.fechaRelativa(p.fecha, M.hoy()))}${p.pagado ? ' · ya registraste el pago' : ''}</small></span>
-          <span class="valor">${p.cuota ? pesos(p.cuota) : ''}</span></button>`).join('')}</div></section>`;
+    // Las cuotas de las deudas y los pagos fijos del mes, juntos y con su estado.
+    const pagosMes = M.pagosDelMes(estado, mesVista);
+    if (pagosMes.length) {
+      const pagado = M.suma(pagosMes.filter((x) => x.estado === 'pagado'), 'monto');
+      html += `<section class="tarjeta" id="pagos-mes"><div class="cabecera-tarjeta"><h2>Pagos de ${esc(M.mesSolo(mesVista))}</h2><span class="sub">${pesos(pagado)} de ${pesos(M.suma(pagosMes, 'monto'))}</span></div>
+        <div class="lista">${pagosMes.map((x) => filaPagoMes(x, r.esActual)).join('')}</div>
+        <div class="botones"><button type="button" class="boton pequeno borde" data-accion="ver-fijos">Pagos fijos</button><button type="button" class="boton pequeno borde" data-accion="pestana" data-p="deudas">Deudas</button></div></section>`;
     }
     const historial = M.historialMeses(estado, mesVista, 6);
     if (historial.filter((h) => h.gastos > 0 || h.ingresos > 0).length >= 2) {
@@ -520,16 +535,24 @@
     return html;
   }
 
-  function proximosPagos(dias) {
+  const ESTADO_PAGO = { pagado: ['bien', 'Pagado'], hoy: ['aviso', 'Hoy'], pendiente: ['neutro', 'Pendiente'], vencido: ['alerta', 'Vencido'] };
+  function chipEstado(x, pasado) {
+    const [clase, nombre] = ESTADO_PAGO[x.estado];
+    return `<span class="estado ${clase}">${x.estado === 'vencido' && pasado ? 'Sin registrar' : nombre}</span>`;
+  }
+  // Una cuota o un pago fijo del mes: tocarlo registra el pago (o abre el que ya se registró).
+  function filaPagoMes(x, actual) {
     const hoy = M.hoy();
-    const lista = [];
-    for (const d of M.activas(estado)) {
-      const fecha = M.proximoPago(d, hoy);
-      if (!fecha || M.diasEntre(hoy, fecha) > dias || !(d.saldo > 0)) continue;
-      const pagado = estado.gastos.some((g) => g.deuda && g.deuda.id === d.id && g.fecha <= fecha && M.diasEntre(g.fecha, fecha) <= 20);
-      lista.push({ deuda: d, fecha, pagado, cuota: M.cuotaUsada(d).cuota });
-    }
-    return lista.sort((a, b) => a.fecha.localeCompare(b.fecha));
+    const icon = x.clase === 'cuota' ? iconoCat({ color: 4, icono: 'tarjeta' }) : iconoCat(M.categoria(estado, x.categoria));
+    const cuando = x.estado === 'pagado' ? `pagado el ${M.fechaCorta(x.pago.fecha)}`
+      : x.estado === 'vencido' ? (actual ? `venció ${M.fechaRelativa(x.fecha, hoy)}` : `era el ${M.fechaCorta(x.fecha)}`)
+        : `${x.automatico ? 'se cobra' : 'vence'} ${M.fechaRelativa(x.fecha, hoy)}`;
+    const tipo = x.clase === 'cuota' ? 'Cuota' : x.automatico ? 'Se cobra solo' : 'Pago fijo';
+    const accion = x.estado === 'pagado' ? `data-accion="editar-gasto" data-id="${esc(x.pago.id)}"`
+      : x.clase === 'cuota' ? `data-accion="pagar-deuda" data-id="${esc(x.id)}"${actual ? '' : ` data-fecha="${x.fecha}"`}`
+        : `data-accion="pagar-fijo" data-id="${esc(x.id)}" data-mes="${x.fecha.slice(0, 7)}"`;
+    return `<button type="button" class="fila" ${accion}>${icon}<span class="centro"><strong>${esc(x.nombre)}</strong><small>${esc(`${tipo} · ${cuando}`)}</small></span>
+      <span class="valor">${pesos(x.monto)}<small>${chipEstado(x, !actual)}</small></span></button>`;
   }
 
   // ---------- pestaña Movimientos ----------
@@ -546,7 +569,7 @@
     }
     let html = '';
     let dia = '';
-    const totalDia = (f) => M.suma(gastos.filter((g) => g.fecha === f), 'monto');
+    const totalDia = (f) => M.suma(gastos.filter((g) => g.fecha === f && !(g.deuda && g.deuda.sinGasto)), 'monto');
     for (const g of gastos) {
       if (g.fecha !== dia) {
         if (dia) html += '</div>';
@@ -555,9 +578,10 @@
       }
       const cat = M.categoria(estado, g.categoria);
       const deuda = g.deuda ? deudaPorId(g.deuda.id) : null;
-      const detalle = [cat.nombre, M.MEDIOS[g.medio], deuda ? `abono a ${deuda.nombre}` : ''].filter(Boolean).join(' · ');
+      const sinGasto = !!(g.deuda && g.deuda.sinGasto);
+      const detalle = [cat.nombre, M.MEDIOS[g.medio], deuda ? `abono a ${deuda.nombre}` : '', g.fijo ? 'pago fijo' : '', sinGasto ? 'no suma a tus gastos' : ''].filter(Boolean).join(' · ');
       html += `<button type="button" class="fila" data-accion="editar-gasto" data-id="${esc(g.id)}">${iconoCat(cat)}
-        <span class="centro"><strong>${esc(g.nota || cat.nombre)}</strong><small>${esc(detalle)}</small></span><span class="valor">${pesos(g.monto)}</span></button>`;
+        <span class="centro"><strong>${esc(g.nota || cat.nombre)}</strong><small>${esc(detalle)}</small></span><span class="valor${sinGasto ? ' tenue' : ''}">${pesos(g.monto)}</span></button>`;
     }
     return html + '</div>';
   }
@@ -565,9 +589,12 @@
     const r = M.resumenMes(estado, mesVista);
     let html = `<header class="encabezado"><h1>Movimientos</h1></header>${selectorMes()}
       <div class="segmentado" role="group" aria-label="Tipo de movimiento">
-        <button type="button" data-accion="modo-mov" data-m="gastos" aria-pressed="${filtro.modo === 'gastos'}">Gastos · ${M.compacto(r.total)}</button>
-        <button type="button" data-accion="modo-mov" data-m="ingresos" aria-pressed="${filtro.modo === 'ingresos'}">Ingresos · ${M.compacto(r.ingresos)}</button></div>`;
+        <button type="button" data-accion="modo-mov" data-m="gastos" aria-pressed="${filtro.modo === 'gastos'}">Gastos</button>
+        <button type="button" data-accion="modo-mov" data-m="fijos" aria-pressed="${filtro.modo === 'fijos'}">Fijos</button>
+        <button type="button" data-accion="modo-mov" data-m="ingresos" aria-pressed="${filtro.modo === 'ingresos'}">Ingresos</button></div>`;
     if (filtro.modo === 'ingresos') return html + htmlListaIngresos(mesVista);
+    if (filtro.modo === 'fijos') return html + htmlListaFijos(mesVista);
+    html += `<p class="sub" style="margin:-6px 0 12px">${pesos(r.total)} en ${plural(r.cantidad, 'gasto', 'gastos')} · ingresos ${pesos(r.ingresos)}</p>`;
     const usadas = new Set(r.gastos.map((g) => g.categoria));
     if (filtro.categoria) usadas.add(filtro.categoria);
     html += `<label class="campo"><span class="oculto-visual">Buscar</span><input id="buscar" type="search" class="entrada" placeholder="Buscar por nota, categoría o valor" value="${esc(filtro.texto)}"></label>
@@ -619,6 +646,45 @@
     return html;
   }
 
+  // ---------- pagos fijos ----------
+  function htmlListaFijos(mes) {
+    const actual = M.mesActual();
+    const activos = estado.fijos.filter((f) => M.fijoActivoEn(f, mes));
+    const cancelados = estado.fijos.filter((f) => f.fin && f.fin < mes);
+    const items = M.pagosDelMes(estado, mes).filter((x) => x.clase === 'fijo');
+    const porId = new Map(items.map((x) => [x.id, x]));
+    let html = `<p class="texto">Suscripciones, plan del celular, internet, gimnasio, seguros, arriendo… Se repiten cada mes y no son deudas: no tienen intereses ni cuotas. Platica los registra (o te recuerda pagarlos) y los suma a tu resumen.</p>`;
+    if (activos.length) {
+      const pagado = M.suma(items.filter((x) => x.estado === 'pagado'), 'monto');
+      html += `<section class="tarjeta heroe"><span class="etiqueta">Pagos fijos al mes</span><strong class="cifra-heroe">${pesos(M.suma(activos, 'monto'))}</strong>
+        <div class="cifras dos"><div class="cifra"><span>Pagado en ${esc(M.mesSolo(mes))}</span><strong>${cifra(pagado)}</strong></div>
+        <div class="cifra"><span>${mes < actual ? 'Sin registrar' : 'Falta'}</span><strong>${cifra(Math.max(0, M.suma(items, 'monto') - pagado))}</strong></div></div></section>
+        <div class="lista tarjeta plana">${activos.map((f) => filaFijo(f, porId.get(f.id), mes < actual)).join('')}</div>`;
+    } else {
+      html += `<div class="vacio">${icono('refrescar')}<p>${mes < actual ? 'No había pagos fijos en este mes.' : 'Aún no tienes pagos fijos.'}</p></div>`;
+    }
+    html += `<button type="button" class="boton primario ancho mt" data-accion="nuevo-fijo">${icono('suma')}Agregar pago fijo</button>`;
+    if (cancelados.length) html += `<h3>Cancelados</h3><div class="lista tarjeta plana">${cancelados.map((f) => filaFijo(f, null, false)).join('')}</div>`;
+    return html;
+  }
+  function filaFijo(f, item, pasado) {
+    const cat = M.categoria(estado, f.categoria);
+    const estadoTxt = item ? chipEstado(item, pasado) : f.fin ? '<span class="estado neutro">Cancelado</span>' : '';
+    return `<button type="button" class="fila" data-accion="ver-fijo" data-id="${esc(f.id)}">${iconoCat(cat)}
+      <span class="centro"><strong>${esc(f.nombre)}</strong><small>${esc(`El ${f.dia} de cada mes · ${f.automatico ? 'se cobra solo' : 'lo pagas tú'}`)}</small></span>
+      <span class="valor">${pesos(f.monto)}<small>${estadoTxt}</small></span></button>`;
+  }
+  // Un cobro automático que ya pasó su fecha se registra solo al abrir la app.
+  function aplicarCobrosAutomaticos() {
+    if (soloLectura || !estado.perfil.configurado) return false;
+    const nuevos = M.cobrosAutomaticos(estado);
+    if (!nuevos.length) return false;
+    estado.gastos.push(...nuevos);
+    guardar();
+    avisar(nuevos.length === 1 ? `Se registró ${nuevos[0].nota} (${pesos(nuevos[0].monto)}), que se cobra solo.` : `Se registraron ${nuevos.length} pagos fijos que se cobran solos.`);
+    return true;
+  }
+
   // ---------- pestaña Deudas ----------
   function htmlDeuda(d) {
     const pagado = M.pctPagado(d);
@@ -641,7 +707,7 @@
     let html = `<header class="encabezado"><div><span class="saludo">Tus créditos y obligaciones</span><h1>Deudas</h1></div></header>`;
     if (!estado.deudas.length) {
       return html + `<section class="tarjeta"><div class="vacio">${icono('tarjeta')}<p>Agrega tus tarjetas, créditos y préstamos. Platica calcula cuánto debes en total, cuándo terminas de pagar, cuánto pagas en intereses y cómo afecta tu puntaje.</p>
-        <button type="button" class="boton primario" data-accion="nueva-deuda">Agregar mi primera deuda</button></div></section>
+        <button type="button" class="boton primario" data-accion="nueva-deuda">Agregar mi primera deuda</button></div></section>${bannerFijos()}
         <div class="banner">${icono('info')}<div><strong>¿Tienes tu reporte de Midatacrédito?</strong><p>En «Mi crédito» puedes cargar tu puntaje y tu diagnóstico, y en «Mis deudas y pagos» del reporte están los saldos de cada producto.</p></div></div>`;
     }
     const grupos = Object.entries(an.porGrupo).filter(([, g]) => g.saldo > 0);
@@ -667,7 +733,11 @@
     if (cerradas.length) {
       html += `<section class="tarjeta mt"><div class="cabecera-tarjeta"><h2>Pagadas</h2><span class="sub">${plural(cerradas.length, 'deuda', 'deudas')}</span></div>${cerradas.map(htmlDeuda).join('')}</section>`;
     }
-    return html;
+    return html + bannerFijos();
+  }
+  function bannerFijos() {
+    return `<div class="banner mt">${icono('refrescar')}<div><strong>¿Suscripciones, plan del celular o gimnasio?</strong><p>No son deudas: no tienen intereses ni cuotas. Agrégalos como pagos fijos y Platica los tendrá en cuenta cada mes.</p>
+      <div class="botones"><button type="button" class="boton primario pequeno" data-accion="ver-fijos">Ver pagos fijos</button></div></div></div>`;
   }
 
   // ---------- pestaña Mi crédito ----------
@@ -760,7 +830,8 @@
   function recordatoriosResumen() {
     const a = estado.ajustes;
     const ingresos = a.recordatorioIngresos && !M.esFijo(estado.perfil, M.mesActual());
-    const activos = [a.recordatorioCuotas && 'cuotas', a.recordatorioDiario && `diario ${a.horaDiario}`, a.resumenMensual && 'resumen', ingresos && 'ingresos'].filter(Boolean);
+    const activos = [a.recordatorioCuotas && 'cuotas', a.recordatorioFijos && estado.fijos.length && 'pagos fijos', a.recordatorioDiario && `diario ${a.horaDiario}`,
+      a.resumenMensual && 'resumen', ingresos && 'ingresos'].filter(Boolean);
     return activos.length ? mayus(activos.join(', ')) : 'Apagados';
   }
 
@@ -871,9 +942,12 @@
   function borradorGasto(v) {
     if (v.borrador) return v.borrador;
     const g = v.id ? estado.gastos.find((x) => x.id === v.id) : null;
+    // fijo: el pago fijo al que corresponde (al pagarlo desde Inicio o desde el pago fijo). repetir: crear un pago fijo con este gasto.
     v.borrador = g
-      ? { monto: g.monto, categoria: g.categoria, fecha: g.fecha, medio: g.medio, nota: g.nota, deuda: g.deuda ? g.deuda.id : '', saldoNuevo: null }
-      : { monto: v.monto || 0, categoria: v.categoria || '', fecha: M.hoy(), medio: '', nota: '', deuda: v.deuda || '', saldoNuevo: null };
+      ? { monto: g.monto, categoria: g.categoria, fecha: g.fecha, medio: g.medio, nota: g.nota, deuda: g.deuda ? g.deuda.id : '', saldoNuevo: null,
+        sinGasto: !!(g.deuda && g.deuda.sinGasto), fijo: g.fijo || '', repetir: false, automatico: false }
+      : { monto: v.monto || 0, categoria: v.categoria || '', fecha: v.fecha || M.hoy(), medio: v.medio || '', nota: v.nota || '', deuda: v.deuda || '',
+        saldoNuevo: null, sinGasto: false, fijo: v.fijo || '', repetir: false, automatico: false };
     return v.borrador;
   }
   // Saldo de la deuda antes de este pago: si se edita un pago, se le devuelve lo que ese pago había abonado.
@@ -901,7 +975,7 @@
         ${deudas.length ? `<label class="campo"><span>¿A qué deuda abonaste?</span><select id="g-deuda-id" class="entrada">
           <option value="">Ninguna en particular</option>
           ${deudas.map((d) => `<option value="${esc(d.id)}"${b.deuda === d.id ? ' selected' : ''}>${esc(d.nombre)} · saldo ${esc(pesos(d.saldo))}</option>`).join('')}</select></label>
-          <div id="g-reparto"></div>`
+          <div id="g-reparto"></div><div id="g-tarjeta"></div>`
         : '<p class="nota" style="margin:-6px 0 14px">Agrega tus deudas en la pestaña Deudas para que cada pago baje su saldo automáticamente.</p>'}
       </div>
       <div class="campo"><span class="etiqueta-campo">Fecha</span>
@@ -911,6 +985,7 @@
       <span class="etiqueta-campo">Medio de pago (opcional)</span>
       <div class="chips" id="g-medios">${Object.entries(M.MEDIOS).map(([id, nombre]) => `<button type="button" class="chip" data-medio="${id}" aria-pressed="${b.medio === id}">${nombre}</button>`).join('')}</div>
       <label class="campo mt"><span>Nota (opcional)</span><input id="g-nota" class="entrada" maxlength="120" placeholder="Ej.: mercado de la semana" value="${esc(b.nota)}"></label>
+      <div id="g-fijo"${b.categoria === 'deudas' ? ' hidden' : ''}>${htmlFijoDelGasto(b)}</div>
       <div id="g-error" class="error-texto" hidden></div>
       <button type="submit" class="boton primario ancho">${icono('check')}Guardar gasto</button>
       ${g ? `<button type="button" class="boton peligro ancho mt" data-accion="eliminar-gasto" data-id="${esc(g.id)}">${icono('basura')}Eliminar</button>` : ''}
@@ -928,7 +1003,23 @@
     b.deuda = b.categoria === 'deudas' && sel ? sel.value : '';
     const saldo = $('#g-saldo', raiz);
     b.saldoNuevo = saldo && saldo.dataset.manual ? M.leerMonto(saldo.value) : null;
+    const sinGasto = $('#g-sin-gasto', raiz);
+    b.sinGasto = !!(sinGasto && sinGasto.checked);
+    const repetir = $('#g-repetir', raiz);
+    b.repetir = !!(repetir && repetir.checked);
+    const automatico = $('#g-automatico', raiz);
+    b.automatico = !!(automatico && automatico.checked);
   };
+  // Un gasto que se repite cada mes (suscripción, plan del celular) puede quedar como pago fijo desde aquí.
+  function htmlFijoDelGasto(b) {
+    const f = b.fijo ? estado.fijos.find((x) => x.id === b.fijo) : null;
+    if (f) {
+      return `<div class="banner bien">${icono('refrescar')}<div><p>Pago fijo: <strong style="display:inline">${esc(f.nombre)}</strong>. Este gasto es el pago de ${esc(M.mesSolo(b.fecha.slice(0, 7)))}.</p></div></div>`;
+    }
+    return `<div class="tarjeta plana" style="padding:4px 14px;margin-bottom:14px">
+      <label class="interruptor"><span>Es un pago fijo cada mes<small>Suscripciones, plan del celular, gimnasio, seguros… No son deudas: Platica los tiene en cuenta cada mes.</small></span><input type="checkbox" id="g-repetir"${b.repetir ? ' checked' : ''}></label>
+      <label class="interruptor" id="g-auto-campo"${b.repetir ? '' : ' hidden'}><span>Se cobra solo<small>Débito automático: Platica lo registra el mismo día cada mes. Si lo pagas tú, te recuerda pagarlo.</small></span><input type="checkbox" id="g-automatico"${b.automatico ? ' checked' : ''}></label></div>`;
+  }
   function montarGasto(raiz, v) {
     const b = borradorGasto(v);
     const monto = $('#g-monto', raiz);
@@ -939,6 +1030,8 @@
       const d = deudaPorId(sel.value);
       if (!d) {
         caja.innerHTML = '';
+        const tarjeta = $('#g-tarjeta', raiz);
+        if (tarjeta) tarjeta.innerHTML = '';
         return;
       }
       const antes = saldoAntesDe(v, d.id);
@@ -946,6 +1039,14 @@
       const rp = M.repartoPago(antes, d.tasa, pago);
       const campo = $('#g-saldo', raiz);
       const manual = campo && campo.dataset.manual ? campo.value : null;
+      // Pago de una tarjeta: si las compras ya se registraron como gastos, el pago no se cuenta otra vez.
+      const tarjeta = $('#g-tarjeta', raiz);
+      if (tarjeta) {
+        const compras = M.suma(estado.gastos.filter((g) => g.medio === 'credito' && g.fecha.startsWith(M.mesActual())), 'monto');
+        tarjeta.innerHTML = M.esRotativa(d) ? `<div class="tarjeta plana" style="padding:4px 14px;margin:-4px 0 14px">
+          <label class="interruptor"><span>Las compras ya están en mis gastos<small>Actívalo si registraste cada compra con «Tarjeta de crédito»: el pago baja la deuda pero no se cuenta otra vez como gasto.${compras ? ` Este mes registraste ${esc(pesos(compras))} en compras con tarjeta.` : ''}</small></span>
+          <input type="checkbox" id="g-sin-gasto"${b.sinGasto ? ' checked' : ''}></label></div>` : '';
+      }
       caja.innerHTML = `<div class="resultado" style="margin:-4px 0 14px"><p class="sub" style="margin:0 0 10px">${d.tasa.valor > 0
         ? `De este pago, unos ${pesos(rp.interes)} serían intereses del mes y ${pesos(rp.capital)} abono a capital.`
         : 'Sin tasa registrada, todo el pago se toma como abono a capital.'}</p>
@@ -962,9 +1063,13 @@
         b.categoria = boton.dataset.cat;
         $$('[data-cat]', raiz).forEach((x) => x.setAttribute('aria-pressed', String(x === boton)));
         $('#g-deuda', raiz).hidden = b.categoria !== 'deudas';
+        $('#g-fijo', raiz).hidden = b.categoria === 'deudas';
         actualizarReparto();
       });
     }
+    const repetir = $('#g-repetir', raiz);
+    if (repetir) repetir.addEventListener('change', () => { $('#g-auto-campo', raiz).hidden = !repetir.checked; });
+    $('#g-tarjeta', raiz)?.addEventListener('change', (ev) => { if (ev.target.id === 'g-sin-gasto') b.sinGasto = ev.target.checked; });
     const sel = $('#g-deuda-id', raiz);
     if (sel) {
       sel.addEventListener('change', () => {
@@ -1031,7 +1136,7 @@
     if (d) {
       const nuevo = b.saldoNuevo != null ? b.saldoNuevo : M.repartoPago(antes, d.tasa, b.monto).saldo;
       const capital = d.saldo - nuevo;
-      pagoDeuda = { id: d.id, capital, interes: Math.max(0, b.monto - Math.max(0, capital)) };
+      pagoDeuda = { id: d.id, capital, interes: Math.max(0, b.monto - Math.max(0, capital)), sinGasto: !!(b.sinGasto && M.esRotativa(d)) };
       d.saldo = nuevo;
       d.historial.push({ fecha: b.fecha, saldo: nuevo });
       d.historial = d.historial.slice(-240);
@@ -1041,7 +1146,21 @@
         terminada = d;
       }
     }
-    const gasto = { id: previo ? previo.id : M.idNuevo(), fecha: b.fecha, monto: b.monto, categoria: b.categoria, nota: b.nota.trim().slice(0, 120), medio: b.medio, deuda: pagoDeuda };
+    // Pago fijo: el que ya tenía, o uno nuevo si se marcó «Es un pago fijo cada mes».
+    let fijoId = !pagoDeuda && b.fijo && estado.fijos.some((f) => f.id === b.fijo) ? b.fijo : null;
+    let fijoNuevo = null;
+    if (!fijoId && !pagoDeuda && b.repetir) {
+      fijoNuevo = { id: M.idNuevo(), nombre: (b.nota.trim() || M.categoria(estado, b.categoria).nombre).slice(0, 60), monto: b.monto, categoria: b.categoria,
+        dia: M.partes(b.fecha).d, medio: b.medio, automatico: b.automatico, desde: b.fecha.slice(0, 7), fin: '', omitidos: [], notas: '', creado: M.hoy() };
+      estado.fijos.push(fijoNuevo);
+      fijoId = fijoNuevo.id;
+    }
+    if (fijoId) {
+      const f = estado.fijos.find((x) => x.id === fijoId);
+      f.omitidos = f.omitidos.filter((m) => m !== b.fecha.slice(0, 7));
+    }
+    const gasto = { id: previo ? previo.id : M.idNuevo(), fecha: b.fecha, monto: b.monto, categoria: b.categoria, nota: b.nota.trim().slice(0, 120), medio: b.medio,
+      deuda: pagoDeuda, fijo: fijoId };
     if (previo) estado.gastos[estado.gastos.indexOf(previo)] = gasto;
     else estado.gastos.push(gasto);
     guardar();
@@ -1050,18 +1169,34 @@
     render();
     if (terminada) avisar(`¡Terminaste de pagar ${terminada.nombre}! Pide el paz y salvo.`);
     else if (previo) avisar('Gasto actualizado');
-    else avisar(`Guardado: ${pesos(gasto.monto)} en ${M.categoria(estado, gasto.categoria).nombre}`, () => eliminarGasto(gasto.id, false));
+    else {
+      const texto = fijoNuevo ? `Guardado. ${fijoNuevo.nombre} quedó como pago fijo el ${fijoNuevo.dia} de cada mes.` : `Guardado: ${pesos(gasto.monto)} en ${M.categoria(estado, gasto.categoria).nombre}`;
+      avisar(texto, () => {
+        eliminarGasto(gasto.id, false);
+        if (fijoNuevo) {
+          estado.fijos = estado.fijos.filter((f) => f !== fijoNuevo);
+          guardar();
+          render(true);
+        }
+      });
+    }
   }
   function eliminarGasto(id, conDeshacer = true) {
     const g = estado.gastos.find((x) => x.id === id);
     if (!g) return;
     const copiaDeuda = g.deuda ? JSON.parse(JSON.stringify(deudaPorId(g.deuda.id))) : null;
     quitarEfectoDeuda(g);
+    // Si era un cobro automático, ese mes queda omitido para que Platica no lo vuelva a registrar.
+    const fijo = g.fijo ? estado.fijos.find((f) => f.id === g.fijo) : null;
+    const mes = g.fecha.slice(0, 7);
+    const omitir = !!(fijo && fijo.automatico && !fijo.omitidos.includes(mes));
+    if (omitir) fijo.omitidos.push(mes);
     estado.gastos = estado.gastos.filter((x) => x.id !== id);
     guardar();
     render(true);
     if (conDeshacer) {
       avisar('Gasto eliminado', () => {
+        if (omitir) fijo.omitidos = fijo.omitidos.filter((m) => m !== mes);
         estado.gastos.push(g);
         if (copiaDeuda) {
           const i = estado.deudas.findIndex((d) => d.id === copiaDeuda.id);
@@ -1213,38 +1348,197 @@
     } };
   };
 
+  // ----- pagos fijos -----
+  const SUGERENCIAS_FIJO = [
+    { nombre: 'Plan del celular', categoria: 'servicios' }, { nombre: 'Internet y TV', categoria: 'servicios' },
+    { nombre: 'Streaming', categoria: 'personales' }, { nombre: 'Gimnasio', categoria: 'personales' },
+    { nombre: 'Seguro', categoria: 'salud' }, { nombre: 'Arriendo', categoria: 'arriendo' }, { nombre: 'Administración', categoria: 'arriendo' },
+  ];
+  VISTAS.fijo = (v) => {
+    const f = estado.fijos.find((x) => x.id === v.id);
+    if (!f) return null;
+    const mes = M.mesActual();
+    const cat = M.categoria(estado, f.categoria);
+    const activo = M.fijoActivoEn(f, mes);
+    const item = activo ? M.pagosDelMes(estado, mes).find((x) => x.clase === 'fijo' && x.id === f.id) : null;
+    const pagos = estado.gastos.filter((g) => g.fijo === f.id).sort((a, b) => b.fecha.localeCompare(a.fecha));
+    const anio = mes.slice(0, 4);
+    const cancelado = f.fin && f.fin < mes;
+    let html = `<section class="tarjeta heroe"><span class="etiqueta">${esc(cat.nombre)}</span><strong class="cifra-heroe">${pesos(f.monto)}</strong>
+      <span class="sub">Al mes · el ${f.dia} de cada mes · ${f.automatico ? 'se cobra solo: Platica lo registra ese día' : 'lo pagas tú: Platica te lo recuerda'}${f.medio ? ` · ${esc(M.MEDIOS[f.medio])}` : ''}</span>
+      ${item ? `<p style="margin:10px 0 0">${chipEstado(item, false)} ${esc(M.mesSolo(mes))}</p>` : ''}
+      ${cancelado ? `<div class="banner mt">${icono('info')}<div><p>Cancelado. ${f.fin >= f.desde ? `El último pago fue en ${esc(M.mesSolo(f.fin))} de ${f.fin.slice(0, 4)}.` : 'Se canceló antes del primer pago.'} Los pagos que registraste siguen en tu historial.</p></div></div>` : ''}
+      ${f.fin === mes ? `<p class="nota">Cancelado desde ${esc(M.mesSolo(M.sumarMeses(mes, 1)))}: este es el último mes.</p>` : ''}
+      <div class="botones">${item && item.estado !== 'pagado' ? `<button type="button" class="boton primario" data-accion="pagar-fijo" data-id="${esc(f.id)}" data-mes="${mes}">${icono('check')}Pagar ${esc(M.mesSolo(mes))}</button>` : ''}
+        <button type="button" class="boton" data-accion="editar-fijo" data-id="${esc(f.id)}">${icono('lapiz')}Editar</button></div></section>
+      <section class="tarjeta"><div class="cabecera-tarjeta"><h2>Pagos registrados</h2><span class="sub">${pesos(M.suma(pagos.filter((g) => g.fecha.startsWith(anio)), 'monto'))} en ${anio}</span></div>
+      ${pagos.length ? `<div class="lista">${pagos.slice(0, 24).map((g) => `<button type="button" class="fila" data-accion="editar-gasto" data-id="${esc(g.id)}">${iconoCat(M.categoria(estado, g.categoria))}
+        <span class="centro"><strong>${esc(mayus(M.mesSolo(g.fecha.slice(0, 7))))} de ${g.fecha.slice(0, 4)}</strong><small>${esc(M.fechaLarga(g.fecha))}</small></span><span class="valor">${pesos(g.monto)}</span></button>`).join('')}</div>`
+        : '<p class="texto">Aún no hay pagos registrados.</p>'}
+      ${f.omitidos.length ? `<p class="nota">Sin cobro: ${esc(f.omitidos.slice(-6).map((m) => `${M.mesSolo(m)} ${m.slice(0, 4)}`).join(', '))}.</p>` : ''}</section>
+      ${f.fin ? `<button type="button" class="boton ancho" data-accion="reactivar-fijo" data-id="${esc(f.id)}">${icono('refrescar')}${cancelado ? 'Volver a pagarlo' : 'No cancelarlo'}</button>`
+        : `<button type="button" class="boton ancho" data-accion="cancelar-fijo" data-id="${esc(f.id)}">${icono('x')}Cancelar este pago</button>`}
+      <button type="button" class="boton peligro ancho mt" data-accion="eliminar-fijo" data-id="${esc(f.id)}">${icono('basura')}Eliminar</button>`;
+    return { titulo: f.nombre, html };
+  };
+  VISTAS.fijoForm = (v) => {
+    const f = v.id ? estado.fijos.find((x) => x.id === v.id) : null;
+    if (v.id && !f) return null;
+    const hoy = M.hoy();
+    const mes = M.mesActual();
+    const b = v.borrador || (v.borrador = f ? { ...f, ya: false }
+      : { nombre: '', monto: 0, categoria: 'servicios', dia: M.partes(hoy).d, medio: '', automatico: false, notas: '', ya: true });
+    const yaVisible = !f && b.dia && `${mes}-${String(Math.min(b.dia, M.diasDelMes(mes))).padStart(2, '0')}` <= hoy;
+    return { titulo: f ? 'Editar pago fijo' : 'Nuevo pago fijo', html: `<form id="form-fijo" autocomplete="off">
+      <div class="monto-grande"><label class="oculto-visual" for="f-monto">Valor</label><input id="f-monto" class="monto" inputmode="numeric" placeholder="$0" value="${b.monto ? esc(pesos(b.monto)) : ''}"><small>¿Cuánto pagas cada mes?</small></div>
+      <label class="campo"><span>Nombre</span><input id="f-nombre" class="entrada" maxlength="60" value="${esc(b.nombre)}" placeholder="Ej.: plan del celular, Netflix, gimnasio"></label>
+      ${f ? '' : `<div class="chips" style="margin:-4px 0 16px">${SUGERENCIAS_FIJO.map((x) => `<button type="button" class="chip" data-sug="${esc(x.nombre)}">${esc(x.nombre)}</button>`).join('')}</div>`}
+      <span class="etiqueta-campo">Categoría</span>
+      <div class="rejilla-cat" role="group" aria-label="Categoría">${estado.categorias.filter((c) => c.id !== 'deudas').map((cat) => `<button type="button" class="cat-boton" data-cat="${esc(cat.id)}" aria-pressed="${b.categoria === cat.id}">${iconoCat(cat, false)}${esc(cat.nombre)}</button>`).join('')}</div>
+      <label class="campo"><span>Día del mes en que se paga</span><input id="f-dia" class="entrada" inputmode="numeric" maxlength="2" placeholder="1 a 31" value="${b.dia || ''}"><small>Si el mes es más corto, cuenta el último día.</small></label>
+      <span class="etiqueta-campo">¿Cómo se paga?</span>
+      <div class="segmentado" role="group"><button type="button" data-auto="1" aria-pressed="${b.automatico}">Se cobra solo</button><button type="button" data-auto="0" aria-pressed="${!b.automatico}">Lo pago yo</button></div>
+      <p class="nota" id="f-auto-nota" style="margin:-6px 0 14px">${b.automatico ? 'Débito automático o cargo a la tarjeta: Platica lo registra como gasto el día del cobro y te avisa la víspera.' : 'Platica te recuerda el día del pago; cuando lo pagues, lo marcas con un toque.'}</p>
+      <span class="etiqueta-campo">Medio de pago (opcional)</span>
+      <div class="chips" style="margin-bottom:14px">${Object.entries(M.MEDIOS).map(([id, nombre]) => `<button type="button" class="chip" data-medio="${id}" aria-pressed="${b.medio === id}">${nombre}</button>`).join('')}</div>
+      ${f ? '' : `<div class="tarjeta plana" id="f-ya-campo" style="padding:4px 14px;margin-bottom:14px"${yaVisible ? '' : ' hidden'}>
+        <label class="interruptor"><span>Ya pagué el de ${esc(M.mesSolo(mes))}<small>Lo registro como gasto de este mes.</small></span><input type="checkbox" id="f-ya"${b.ya ? ' checked' : ''}></label></div>`}
+      <label class="campo"><span>Notas (opcional)</span><input id="f-notas" class="entrada" maxlength="200" value="${esc(b.notas)}"></label>
+      <div id="f-error" class="error-texto" hidden></div>
+      <button type="submit" class="boton primario ancho">${icono('check')}Guardar pago fijo</button></form>`,
+    montar: (raiz) => {
+      const elegirEn = (selector, valor) => $$(selector, raiz).forEach((x) => x.setAttribute('aria-pressed', String(x === valor)));
+      for (const chip of $$('[data-sug]', raiz)) {
+        chip.addEventListener('click', () => {
+          const sug = SUGERENCIAS_FIJO.find((x) => x.nombre === chip.dataset.sug);
+          $('#f-nombre', raiz).value = sug.nombre;
+          b.categoria = sug.categoria;
+          $$('[data-cat]', raiz).forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.cat === b.categoria)));
+        });
+      }
+      for (const boton of $$('[data-cat]', raiz)) {
+        boton.addEventListener('click', () => {
+          b.categoria = boton.dataset.cat;
+          elegirEn('[data-cat]', boton);
+        });
+      }
+      for (const boton of $$('[data-auto]', raiz)) {
+        boton.addEventListener('click', () => {
+          b.automatico = boton.dataset.auto === '1';
+          elegirEn('[data-auto]', boton);
+          $('#f-auto-nota', raiz).textContent = b.automatico ? 'Débito automático o cargo a la tarjeta: Platica lo registra como gasto el día del cobro y te avisa la víspera.'
+            : 'Platica te recuerda el día del pago; cuando lo pagues, lo marcas con un toque.';
+        });
+      }
+      for (const chip of $$('[data-medio]', raiz)) {
+        chip.addEventListener('click', () => {
+          b.medio = b.medio === chip.dataset.medio ? '' : chip.dataset.medio;
+          $$('[data-medio]', raiz).forEach((x) => x.setAttribute('aria-pressed', String(x.dataset.medio === b.medio)));
+        });
+      }
+      const campoYa = $('#f-ya-campo', raiz);
+      $('#f-dia', raiz).addEventListener('input', (ev) => {
+        const dia = Math.min(31, M.leerMonto(ev.target.value));
+        if (campoYa) campoYa.hidden = !(dia && `${mes}-${String(Math.min(dia, M.diasDelMes(mes))).padStart(2, '0')}` <= hoy);
+      });
+      $('#form-fijo', raiz).addEventListener('submit', (ev) => {
+        ev.preventDefault();
+        const error = $('#f-error', raiz);
+        const monto = M.leerMonto($('#f-monto', raiz).value);
+        const nombre = $('#f-nombre', raiz).value.trim().slice(0, 60);
+        const dia = Math.min(31, M.leerMonto($('#f-dia', raiz).value));
+        if (!monto) return mostrarError(error, 'Escribe cuánto pagas cada mes.');
+        if (!nombre) return mostrarError(error, 'Ponle un nombre (por ejemplo, «Plan del celular»).');
+        if (!dia) return mostrarError(error, 'Escribe el día del mes en que se paga (1 a 31).');
+        const datos = { nombre, monto, categoria: b.categoria, dia, medio: b.medio, automatico: b.automatico, notas: $('#f-notas', raiz).value.trim().slice(0, 200) };
+        if (f) {
+          Object.assign(f, datos);
+          guardar();
+          cerrarVista();
+          avisar('Pago fijo actualizado. Los pagos anteriores no cambian.');
+          return;
+        }
+        const nuevo = { id: M.idNuevo(), ...datos, desde: mes, fin: '', omitidos: [], creado: hoy };
+        const fecha = M.fechaFijo(nuevo, mes);
+        if (fecha <= hoy) {
+          const ya = $('#f-ya', raiz);
+          if (ya && ya.checked) estado.gastos.push({ id: M.idNuevo(), fecha, monto, categoria: nuevo.categoria, nota: nombre, medio: nuevo.medio, deuda: null, fijo: nuevo.id });
+          else if (nuevo.automatico) nuevo.omitidos.push(mes);
+        }
+        estado.fijos.push(nuevo);
+        guardar();
+        reemplazar({ tipo: 'fijo', id: nuevo.id });
+        avisar(`${nombre} quedó como pago fijo el ${dia} de cada mes.`);
+        if (estado.ajustes.recordatorioFijos) ofrecerNotificaciones();
+      });
+    } };
+  };
+
   // ----- deudas -----
-  const DEUDA_VACIA = { nombre: '', entidad: '', tipo: 'tarjeta', inicial: 0, saldo: 0, cuota: 0, tasa: { valor: 0, tipo: 'EA' }, diaPago: 0, apertura: '', plazo: 0, estado: 'al_dia', diasMora: 0, reportada: true, codeudor: false, notas: '' };
+  const DEUDA_VACIA = { nombre: '', entidad: '', tipo: 'libre_inversion', inicial: 0, saldo: 0, cuota: 0, tasa: { valor: 0, tipo: 'EA' }, diaPago: 0, apertura: '',
+    plazo: 0, estado: 'al_dia', diasMora: 0, reportada: true, codeudor: false, notas: '', inicio: '', primera: '', pagadas: null, saldoConocido: false, estimados: [] };
+  const esRotativo = (tipo) => M.TIPOS_DEUDA[tipo].grupo === 'rotativo';
+  function borradorDeuda(v) {
+    if (v.borrador) return v.borrador;
+    const d = v.id ? deudaPorId(v.id) : null;
+    if (!d) return (v.borrador = JSON.parse(JSON.stringify(DEUDA_VACIA)));
+    const b = JSON.parse(JSON.stringify(d));
+    // Lo que calculó Platica se vuelve a calcular al editar; lo que escribió la persona se conserva.
+    if (b.estimados.includes('tasa')) b.tasa = { valor: 0, tipo: 'EA' };
+    b.pagadas = null;
+    b.saldoConocido = true;
+    return (v.borrador = b);
+  }
   VISTAS.deudaForm = (v) => {
     const d = v.id ? deudaPorId(v.id) : null;
     if (v.id && !d) return null;
-    const b = v.borrador || (v.borrador = JSON.parse(JSON.stringify(d || DEUDA_VACIA)));
-    const rot = M.TIPOS_DEUDA[b.tipo].grupo === 'rotativo';
+    const b = borradorDeuda(v);
+    const rot = esRotativo(b.tipo);
+    const monto = (id, valor, placeholder = '$0') => `<input id="${id}" class="entrada monto" inputmode="numeric" placeholder="${placeholder}" value="${valor ? esc(pesos(valor)) : ''}">`;
     return { titulo: d ? 'Editar deuda' : 'Nueva deuda', html: `<form id="form-deuda" autocomplete="off">
       <label class="campo"><span>Tipo</span><select id="d-tipo" class="entrada">${Object.entries(M.TIPOS_DEUDA).map(([id, t]) => `<option value="${id}"${b.tipo === id ? ' selected' : ''}>${esc(t.nombre)}</option>`).join('')}</select></label>
-      <label class="campo"><span>Nombre</span><input id="d-nombre" class="entrada" maxlength="60" value="${esc(b.nombre)}" placeholder="Ej.: Tarjeta Visa"></label>
-      <label class="campo"><span>Entidad (opcional)</span><input id="d-entidad" class="entrada" maxlength="60" value="${esc(b.entidad)}" placeholder="Banco, almacén, cooperativa…"></label>
-      <div class="fila-campos">
-        <label class="campo"><span id="d-inicial-txt">${rot ? 'Cupo aprobado' : 'Valor del crédito'}</span><input id="d-inicial" class="entrada monto" inputmode="numeric" placeholder="$0" value="${b.inicial ? esc(pesos(b.inicial)) : ''}"></label>
-        <label class="campo"><span>Saldo actual</span><input id="d-saldo" class="entrada monto" inputmode="numeric" placeholder="$0" value="${b.saldo ? esc(pesos(b.saldo)) : ''}"></label>
+      <div class="banner" id="d-nota-telecom"${b.tipo === 'telecom' ? '' : ' hidden'}>${icono('info')}<div><p>Aquí van los equipos que compraste a cuotas. Si es tu plan pospago del celular o del internet, no es una deuda: agrégalo como <strong style="display:inline">pago fijo</strong> en Movimientos → Fijos.</p></div></div>
+      <label class="campo"><span>Nombre</span><input id="d-nombre" class="entrada" maxlength="60" value="${esc(b.nombre)}" placeholder="Ej.: Crédito del celular"></label>
+      <label class="campo"><span>Entidad (opcional)</span><input id="d-entidad" class="entrada" maxlength="60" value="${esc(b.entidad)}" placeholder="Banco, almacén, cooperativa, app…"></label>
+      <div id="d-sec-fijo-a"${rot ? ' hidden' : ''}>
+        <h3>Lo que sabes del crédito</h3><p class="nota" style="margin:-4px 0 12px">Escribe lo que sepas. Con tres de estos datos (lo que te prestaron, la cuota, el número de cuotas o la tasa) Platica calcula el resto.</p>
+        <div class="fila-campos">
+          <label class="campo"><span>¿Cuánto te prestaron?</span>${monto('d-monto', b.inicial)}</label>
+          <label class="campo"><span>Cuota mensual</span>${monto('d-cuota', b.cuota)}</label>
+        </div>
+        <div class="fila-campos">
+          <label class="campo"><span>Número de cuotas</span><input id="d-plazo" class="entrada" inputmode="numeric" maxlength="3" placeholder="Ej.: 12" value="${b.plazo || ''}"></label>
+          <label class="campo"><span>Cuotas ya pagadas</span><input id="d-pagadas" class="entrada" inputmode="numeric" maxlength="3" value="${b.pagadas != null ? b.pagadas : ''}"></label>
+        </div>
       </div>
-      <div class="fila-campos">
-        <label class="campo"><span>Cuota mensual</span><input id="d-cuota" class="entrada monto" inputmode="numeric" placeholder="$0" value="${b.cuota ? esc(pesos(b.cuota)) : ''}"></label>
-        <label class="campo"><span>Día de pago</span><input id="d-dia" class="entrada" inputmode="numeric" maxlength="2" placeholder="1 a 31" value="${b.diaPago || ''}"></label>
+      <div id="d-sec-rot-a"${rot ? '' : ' hidden'}>
+        <div class="fila-campos">
+          <label class="campo"><span>Cupo aprobado</span>${monto('d-cupo', b.inicial)}</label>
+          <label class="campo"><span>Saldo actual</span>${monto('d-saldo-rot', b.saldo)}</label>
+        </div>
+        <div class="fila-campos">
+          <label class="campo"><span>Pago mínimo (opcional)</span>${monto('d-minimo', b.cuota)}</label>
+          <label class="campo"><span>Día de pago</span><input id="d-dia" class="entrada" inputmode="numeric" maxlength="2" placeholder="1 a 31" value="${b.diaPago || ''}"></label>
+        </div>
       </div>
-      <div class="campo"><span class="etiqueta-campo">Tasa de interés</span><div class="con-sufijo">
-        <input id="d-tasa" class="entrada" inputmode="decimal" placeholder="Ej.: 26,5" value="${b.tasa.valor ? esc(M.decimal(b.tasa.valor, 2)) : ''}" aria-label="Tasa de interés en porcentaje">
+      <div class="campo"><span class="etiqueta-campo" id="d-tasa-txt">${rot ? 'Tasa de interés' : 'Tasa de interés (si la sabes)'}</span><div class="con-sufijo">
+        <input id="d-tasa" class="entrada" inputmode="decimal" placeholder="${rot ? 'Ej.: 26,5' : 'Si no la sabes, se calcula'}" value="${b.tasa.valor ? esc(M.decimal(b.tasa.valor, 2)) : ''}" aria-label="Tasa de interés en porcentaje">
         <div class="segmentado" role="group" style="margin:0;flex:none"><button type="button" data-tasa="EA" aria-pressed="${b.tasa.tipo === 'EA'}">% E.A.</button><button type="button" data-tasa="MV" aria-pressed="${b.tasa.tipo === 'MV'}">% M.V.</button></div></div>
         <small id="d-tasa-info"></small></div>
-      <div class="fila-campos">
-        <label class="campo"><span>Fecha de apertura</span><input id="d-apertura" type="month" class="entrada" value="${esc(b.apertura)}" max="${M.mesActual()}"></label>
-        <label class="campo" id="d-plazo-campo"${rot ? ' hidden' : ''}><span>Plazo (meses)</span><input id="d-plazo" class="entrada" inputmode="numeric" maxlength="3" value="${b.plazo || ''}"></label>
+      <div id="d-sec-fijo-b"${rot ? ' hidden' : ''}>
+        <div class="fila-campos">
+          <label class="campo"><span>¿Cuándo te lo dieron?</span><input id="d-inicio" type="date" class="entrada" value="${esc(b.inicio)}" max="${M.hoy()}"></label>
+          <label class="campo"><span>Primera cuota</span><input id="d-primera" type="date" class="entrada" value="${esc(b.primera)}"></label>
+        </div>
+        <label class="campo"><span>Saldo actual (si lo sabes)</span>${monto('d-saldo', b.saldoConocido ? b.saldo : 0, 'Se calcula')}<small>Lo que te falta pagar de capital, como sale en la app o el extracto de la entidad.</small></label>
+        <div id="d-calculo"></div>
       </div>
+      <label class="campo" id="d-apertura-campo"${rot ? '' : ' hidden'}><span>Fecha de apertura</span><input id="d-apertura" type="month" class="entrada" value="${esc(b.apertura)}" max="${M.mesActual()}"></label>
       <span class="etiqueta-campo">Estado</span>
       <div class="segmentado" role="group"><button type="button" data-estado="al_dia" aria-pressed="${b.estado === 'al_dia'}">Al día</button><button type="button" data-estado="mora" aria-pressed="${b.estado === 'mora'}">En mora</button></div>
       <label class="campo" id="d-mora-campo"${b.estado === 'mora' ? '' : ' hidden'}><span>Días de mora</span><input id="d-mora" class="entrada" inputmode="numeric" maxlength="4" value="${b.diasMora || ''}"></label>
       <div class="tarjeta plana" style="padding:4px 14px">
-        <label class="interruptor"><span>Aparece en centrales de riesgo<small>Bancos, almacenes y cooperativas reportan a Datacrédito y TransUnion</small></span><input type="checkbox" id="d-reportada"${b.reportada ? ' checked' : ''}></label>
+        <label class="interruptor"><span>Aparece en centrales de riesgo<small>Bancos, almacenes, cooperativas y muchas apps reportan a Datacrédito y TransUnion</small></span><input type="checkbox" id="d-reportada"${b.reportada ? ' checked' : ''}></label>
         <label class="interruptor"><span>Soy codeudor<small>La deuda es de otra persona y tú la respaldas</small></span><input type="checkbox" id="d-codeudor"${b.codeudor ? ' checked' : ''}></label>
       </div>
       <label class="campo mt"><span>Notas (opcional)</span><textarea id="d-notas" class="entrada" maxlength="200">${esc(b.notas)}</textarea></label>
@@ -1252,57 +1546,131 @@
       <button type="submit" class="boton primario ancho">${icono('check')}Guardar deuda</button></form>`,
     montar: montarDeuda };
   };
+  // Lee el formulario en el borrador. En un crédito de cuota fija, lo vacío queda en 0 o null: es lo que Platica calcula.
   CAPTURAR.deudaForm = (v, raiz) => {
     const b = v.borrador;
     if (!b || !$('#d-nombre', raiz)) return;
+    const tipo = $('#d-tipo', raiz).value;
+    const rot = esRotativo(tipo);
+    const texto = (id) => $(id, raiz).value.trim();
     Object.assign(b, {
-      tipo: $('#d-tipo', raiz).value,
+      tipo,
       nombre: $('#d-nombre', raiz).value,
       entidad: $('#d-entidad', raiz).value,
-      inicial: M.leerMonto($('#d-inicial', raiz).value),
-      saldo: M.leerMonto($('#d-saldo', raiz).value),
-      cuota: M.leerMonto($('#d-cuota', raiz).value),
-      diaPago: Math.min(31, M.leerMonto($('#d-dia', raiz).value)),
-      apertura: $('#d-apertura', raiz).value,
-      plazo: Math.min(600, M.leerMonto($('#d-plazo', raiz).value)),
       diasMora: Math.min(3650, M.leerMonto($('#d-mora', raiz).value)),
       reportada: $('#d-reportada', raiz).checked,
       codeudor: $('#d-codeudor', raiz).checked,
       notas: $('#d-notas', raiz).value,
     });
     b.tasa.valor = Math.min(1000, M.leerDecimal($('#d-tasa', raiz).value));
+    if (rot) {
+      Object.assign(b, {
+        inicial: M.leerMonto($('#d-cupo', raiz).value),
+        saldo: M.leerMonto($('#d-saldo-rot', raiz).value),
+        cuota: M.leerMonto($('#d-minimo', raiz).value),
+        diaPago: Math.min(31, M.leerMonto($('#d-dia', raiz).value)),
+        apertura: $('#d-apertura', raiz).value,
+      });
+    } else {
+      Object.assign(b, {
+        inicial: M.leerMonto($('#d-monto', raiz).value),
+        cuota: M.leerMonto($('#d-cuota', raiz).value),
+        plazo: Math.min(600, M.leerMonto($('#d-plazo', raiz).value)),
+        pagadas: texto('#d-pagadas') ? Math.min(600, M.leerMonto(texto('#d-pagadas'))) : null,
+        inicio: $('#d-inicio', raiz).value,
+        primera: $('#d-primera', raiz).value,
+        saldoConocido: !!texto('#d-saldo'),
+        saldo: M.leerMonto($('#d-saldo', raiz).value),
+      });
+    }
   };
+  function calcularCredito(b) {
+    return M.completarCredito({ monto: b.inicial, cuota: b.cuota, plazo: b.plazo, tasa: b.tasa, primera: b.primera,
+      pagadas: b.pagadas, saldo: b.saldoConocido ? b.saldo : null }, M.hoy());
+  }
+  function htmlCalculoCredito(r) {
+    if (!r.completo) {
+      return r.avisos.length ? r.avisos.map((a) => `<div class="banner critico">${icono('alerta')}<div><p>${esc(a.texto)}</p></div></div>`).join('')
+        : '<p class="nota">Escribe al menos tres de estos datos: cuánto te prestaron, la cuota, el número de cuotas o la tasa.</p>';
+    }
+    const calculado = (campo) => (r.calculados.includes(campo) ? ' <small class="calculado">calculado</small>' : '');
+    const ea = M.tasaEA({ valor: r.i * 100, tipo: 'MV' });
+    const eaCosto = M.tasaEA({ valor: r.iCosto * 100, tipo: 'MV' });
+    const filas = [
+      ['Tasa', r.i > 0 ? `${M.decimal(r.i * 100, 2)}% M.V. · ${M.decimal(ea * 100, 1)}% E.A.` : 'Sin intereses', 'tasa'],
+      ['Cuota mensual', pesos(r.cuota), 'cuota'],
+      ['Número de cuotas', String(r.plazo), 'plazo'],
+      ['Te prestaron', pesos(r.monto), 'inicial'],
+      ['Total a pagar', pesos(r.total), ''],
+      ['Intereses y cargos', pesos(r.intereses), ''],
+      ['Cuotas pagadas', `${r.pagadas} de ${r.plazo}`, 'pagadas'],
+      ['Saldo de capital hoy', pesos(r.saldo), 'saldo'],
+    ];
+    if (r.proxima) filas.push(['Próxima cuota', M.fechaLarga(r.proxima), '']);
+    if (r.fin) filas.push(['Última cuota', M.fechaLarga(r.fin), '']);
+    let html = `<div class="resultado calculo"><strong>Platica calculó</strong><ul class="calculos">${filas.map(([k, val, campo]) => `<li><span>${k}</span><strong>${esc(val)}${campo ? calculado(campo) : ''}</strong></li>`).join('')}</ul></div>`;
+    if (r.cargos) {
+      html += `<div class="banner aviso">${icono('info')}<div><strong>La cuota trae unos ${pesos(r.cargos)} de más cada mes</strong><p>Con la tasa que escribiste la cuota sería menor. La diferencia suele ser seguro de vida, fianza o comisiones. Con todo incluido, el crédito cuesta ${M.decimal(eaCosto * 100, 1)}% E.A.</p></div></div>`;
+    }
+    if (eaCosto * 100 > estado.ajustes.usura.ea + 0.005) {
+      html += `<div class="banner critico">${icono('alerta')}<div><strong>Este crédito cuesta ${M.decimal(eaCosto * 100, 1)}% E.A.</strong><p>Es más que la tasa de usura de consumo (${M.decimal(estado.ajustes.usura.ea, 2)}% E.A. en ${esc(M.mesSolo(estado.ajustes.usura.vigencia))}). Puede incluir seguros, fianzas o comisiones además del interés: pide a la entidad el detalle de la tasa y de cada cargo. Si la tasa de interés sola supera la usura, puedes quejarte ante la Superintendencia Financiera.</p></div></div>`;
+    }
+    for (const a of r.avisos) html += `<div class="banner ${a.nivel === 'critico' ? 'critico' : 'aviso'}">${icono('alerta')}<div><p>${esc(a.texto)}</p></div></div>`;
+    return html;
+  }
   function montarDeuda(raiz, v) {
     const b = v.borrador;
-    const infoTasa = () => {
-      const valor = M.leerDecimal($('#d-tasa', raiz).value);
+    const actualizar = () => {
+      CAPTURAR.deudaForm(v, raiz);
+      // La tasa: equivalencia y aviso de usura.
       const caja = $('#d-tasa-info', raiz);
-      if (!valor) {
-        caja.textContent = 'La encuentras en el extracto. E.A. es efectiva anual; M.V., mes vencido.';
+      if (!b.tasa.valor) {
+        caja.textContent = esRotativo(b.tipo) ? 'La encuentras en el extracto. E.A. es efectiva anual; M.V., mes vencido.' : 'Si no la sabes, déjala vacía: se calcula con la cuota.';
         caja.className = '';
-        return;
+      } else {
+        const ea = M.tasaEA(b.tasa);
+        const otra = b.tasa.tipo === 'EA' ? `Equivale a ${M.decimal(M.tasaMensual(b.tasa) * 100, 2)}% M.V.` : `Equivale a ${M.decimal(ea * 100, 2)}% E.A.`;
+        const usura = ea * 100 > estado.ajustes.usura.ea + 0.005;
+        caja.textContent = usura ? `${otra} Supera la tasa de usura (${M.decimal(estado.ajustes.usura.ea, 2)}% E.A.): revísala en tu extracto.` : otra;
+        caja.className = usura ? 'texto-critico' : '';
       }
-      const tasa = { valor, tipo: b.tasa.tipo };
-      const ea = M.tasaEA(tasa);
-      const otra = b.tasa.tipo === 'EA' ? `Equivale a ${M.decimal(M.tasaMensual(tasa) * 100, 2)}% M.V.` : `Equivale a ${M.decimal(ea * 100, 2)}% E.A.`;
-      const usura = ea * 100 > estado.ajustes.usura.ea + 0.005;
-      caja.textContent = usura ? `${otra} Supera la tasa de usura (${M.decimal(estado.ajustes.usura.ea, 2)}% E.A.): revísala en tu extracto.` : otra;
-      caja.className = usura ? 'texto-critico' : '';
+      if (esRotativo(b.tipo)) return;
+      const r = calcularCredito(b);
+      $('#d-calculo', raiz).innerHTML = htmlCalculoCredito(r);
+      // Los campos vacíos muestran lo que se calculó.
+      $('#d-pagadas', raiz).placeholder = r.completo ? `${r.pagadas} (calculado)` : 'Se calcula';
+      $('#d-saldo', raiz).placeholder = r.completo ? `${pesos(r.saldo)} (calculado)` : 'Se calcula';
     };
-    $('#d-tasa', raiz).addEventListener('input', infoTasa);
+    // Los eventos se escuchan en el formulario: #hoja se reutiliza entre pantallas y acumularía escuchas viejas.
+    const formulario = $('#form-deuda', raiz);
+    formulario.addEventListener('input', actualizar);
+    formulario.addEventListener('change', actualizar);
+    // La primera cuota se propone un mes después de recibir el crédito, mientras la persona no la cambie.
+    const primera = $('#d-primera', raiz);
+    if (!primera.value) primera.dataset.auto = '1';
+    primera.addEventListener('input', () => { delete primera.dataset.auto; });
+    $('#d-inicio', raiz).addEventListener('change', (ev) => {
+      if (primera.dataset.auto && ev.target.value) {
+        primera.value = M.primeraCuotaDe(ev.target.value);
+        actualizar();
+      }
+    });
     for (const boton of $$('[data-tasa]', raiz)) {
       boton.addEventListener('click', () => {
         b.tasa.tipo = boton.dataset.tasa;
         $$('[data-tasa]', raiz).forEach((x) => x.setAttribute('aria-pressed', String(x === boton)));
-        infoTasa();
+        actualizar();
       });
     }
-    infoTasa();
     $('#d-tipo', raiz).addEventListener('change', (ev) => {
-      const rot = M.TIPOS_DEUDA[ev.target.value].grupo === 'rotativo';
-      $('#d-inicial-txt', raiz).textContent = rot ? 'Cupo aprobado' : 'Valor del crédito';
-      $('#d-plazo-campo', raiz).hidden = rot;
+      const rot = esRotativo(ev.target.value);
+      for (const id of ['#d-sec-fijo-a', '#d-sec-fijo-b']) $(id, raiz).hidden = rot;
+      for (const id of ['#d-sec-rot-a', '#d-apertura-campo']) $(id, raiz).hidden = !rot;
+      $('#d-tasa-txt', raiz).textContent = rot ? 'Tasa de interés' : 'Tasa de interés (si la sabes)';
+      $('#d-tasa', raiz).placeholder = rot ? 'Ej.: 26,5' : 'Si no la sabes, se calcula';
+      $('#d-nota-telecom', raiz).hidden = ev.target.value !== 'telecom';
       if (ev.target.value === 'personal') $('#d-reportada', raiz).checked = false;
+      actualizar();
     });
     for (const boton of $$('[data-estado]', raiz)) {
       boton.addEventListener('click', () => {
@@ -1311,28 +1679,51 @@
         $('#d-mora-campo', raiz).hidden = b.estado !== 'mora';
       });
     }
+    actualizar();
     $('#form-deuda', raiz).addEventListener('submit', (ev) => {
       ev.preventDefault();
       CAPTURAR.deudaForm(v, raiz);
       const error = $('#d-error', raiz);
       const nombre = b.nombre.trim() || M.TIPOS_DEUDA[b.tipo].nombre;
-      if (!b.saldo && !b.inicial) return mostrarError(error, 'Escribe al menos el saldo actual.');
-      const previa = v.id ? deudaPorId(v.id) : null;
-      const datos = M.normalizarEstado({ deudas: [{ ...b, id: previa ? previa.id : M.idNuevo(), nombre, creada: previa ? previa.creada : M.hoy(),
-        historial: previa ? previa.historial : [], cerrada: previa ? previa.cerrada : false, cerradaFecha: previa ? previa.cerradaFecha : '' }] }).deudas[0];
-      if (!previa || previa.saldo !== datos.saldo) datos.historial = [...datos.historial, { fecha: M.hoy(), saldo: datos.saldo }].slice(-240);
-      if (previa) {
-        if (datos.cerrada && datos.saldo > 0) {
-          datos.cerrada = false;
-          datos.cerradaFecha = '';
+      const datos = { ...b, nombre, estimados: [] };
+      if (esRotativo(b.tipo)) {
+        if (!b.saldo && !b.inicial) return mostrarError(error, 'Escribe al menos el saldo actual.');
+        Object.assign(datos, { plazo: 0, inicio: '', primera: '' });
+      } else {
+        const r = calcularCredito(b);
+        if (r.completo) {
+          // Se guarda lo que escribió la persona y, donde no sabía, lo que calculó Platica.
+          Object.assign(datos, { inicial: r.monto, cuota: r.cuota, plazo: r.plazo, saldo: r.saldo,
+            estimados: r.calculados.filter((x) => ['tasa', 'saldo', 'cuota', 'plazo', 'inicial'].includes(x)) });
+          if (r.calculados.includes('tasa')) datos.tasa = { valor: Math.round(r.i * 1e6) / 1e4, tipo: 'MV' };
+        } else if (r.avisos.length) {
+          return mostrarError(error, r.avisos[0].texto);
+        } else {
+          if (!b.inicial && !b.saldoConocido) return mostrarError(error, 'Escribe al menos cuánto te prestaron o cuánto debes.');
+          if (!b.saldoConocido) {
+            datos.saldo = b.inicial;
+            datos.estimados = ['saldo'];
+          }
         }
-        estado.deudas[estado.deudas.indexOf(previa)] = datos;
-      } else estado.deudas.push(datos);
+        datos.diaPago = b.primera ? M.partes(b.primera).d : 0;
+        datos.apertura = b.inicio ? b.inicio.slice(0, 7) : b.apertura;
+      }
+      const previa = v.id ? deudaPorId(v.id) : null;
+      const deuda = M.normalizarEstado({ deudas: [{ ...datos, id: previa ? previa.id : M.idNuevo(), creada: previa ? previa.creada : M.hoy(),
+        historial: previa ? previa.historial : [], cerrada: previa ? previa.cerrada : false, cerradaFecha: previa ? previa.cerradaFecha : '' }] }).deudas[0];
+      if (!previa || previa.saldo !== deuda.saldo) deuda.historial = [...deuda.historial, { fecha: M.hoy(), saldo: deuda.saldo }].slice(-240);
+      if (previa) {
+        if (deuda.cerrada && deuda.saldo > 0) {
+          deuda.cerrada = false;
+          deuda.cerradaFecha = '';
+        }
+        estado.deudas[estado.deudas.indexOf(previa)] = deuda;
+      } else estado.deudas.push(deuda);
       guardar();
       if (previa) cerrarVista();
-      else reemplazar({ tipo: 'deuda', id: datos.id });
+      else reemplazar({ tipo: 'deuda', id: deuda.id });
       avisar(previa ? 'Deuda actualizada' : 'Deuda agregada');
-      if (datos.diaPago && estado.ajustes.recordatorioCuotas) ofrecerNotificaciones();
+      if (deuda.diaPago && estado.ajustes.recordatorioCuotas) ofrecerNotificaciones();
     });
   }
 
@@ -1348,23 +1739,39 @@
     const ea = M.tasaEA(d.tasa);
     let html = `<section class="tarjeta heroe"><span class="etiqueta">${esc([M.TIPOS_DEUDA[d.tipo].nombre, d.entidad].filter(Boolean).join(' · '))}</span>
       <strong class="cifra-heroe">${pesos(d.saldo)}</strong>
+      ${d.estimados.includes('saldo') && !pagos.length ? '<p class="sub" style="margin:-6px 0 8px">Saldo de capital calculado por Platica con tus cuotas y fechas</p>' : ''}
       ${d.cerrada ? '<span class="estado bien">Pagada</span>' : d.estado === 'mora' ? `<span class="estado alerta">En mora${d.diasMora ? ` · ${d.diasMora} días` : ''}</span>` : '<span class="estado bien">Al día</span>'}
       ${d.codeudor ? '<span class="estado neutro">Como codeudor</span>' : ''}${!d.reportada ? '<span class="estado neutro">No reportada</span>' : ''}
       ${uso != null ? `<div class="medidor mt ${uso > 0.87 ? 'critico' : uso > 0.3 ? 'aviso' : ''}"><span style="width:${Math.min(100, uso * 100)}%"></span></div><div class="medidor-texto"><span>Usas el ${porcentaje(uso)} de tu cupo de ${pesos(d.inicial)}</span></div>` : ''}
       ${pagado != null ? `<div class="medidor mt"><span style="width:${pagado * 100}%"></span></div><div class="medidor-texto"><span>Has pagado el ${porcentaje(pagado)} de ${pesos(d.inicial)}</span></div>` : ''}
       <div class="cifras">
         <div class="cifra"><span>Cuota</span><strong>${p.cuota ? cifra(p.cuota) : '—'}</strong><small>${p.estimada ? 'estimada' : 'mensual'}</small></div>
-        <div class="cifra"><span>Tasa</span><strong>${d.tasa.valor ? `${M.decimal(ea * 100, 1)}%` : '—'}</strong><small>${d.tasa.valor ? `E.A. · ${M.decimal(M.tasaMensual(d.tasa) * 100, 2)}% M.V.` : 'sin registrar'}</small></div>
+        <div class="cifra"><span>Tasa</span><strong>${d.tasa.valor ? `${M.decimal(ea * 100, 1)}%` : '—'}</strong><small>${d.tasa.valor ? `E.A.${d.estimados.includes('tasa') ? ' · calculada' : ` · ${M.decimal(M.tasaMensual(d.tasa) * 100, 2)}% M.V.`}` : 'sin registrar'}</small></div>
         <div class="cifra"><span>Próx. pago</span><strong>${fecha ? esc(M.fechaCorta(fecha)) : '—'}</strong><small>${fecha ? esc(M.fechaRelativa(fecha, M.hoy())) : 'sin día de pago'}</small></div>
       </div>
       ${d.cerrada ? '' : `<div class="botones"><button type="button" class="boton primario" data-accion="pagar-deuda" data-id="${esc(d.id)}">${icono('check')}Registrar pago</button>
         <button type="button" class="boton" data-accion="actualizar-saldo" data-id="${esc(d.id)}">Actualizar saldo</button></div>`}</section>`;
+    // Crédito de cuota fija con fechas: en qué cuota va, cuánto cuesta en total y si el costo pasa la usura.
+    if (!rot && d.plazo && d.cuota && d.inicial) {
+      const numero = d.primera ? Math.min(d.plazo, M.cuotasVencidas(d.primera, d.plazo, M.sumarDias(M.hoy(), -1)) + 1) : 0;
+      const costo = M.tasaImplicita(d.inicial, d.cuota, d.plazo);
+      const eaCosto = costo != null ? M.tasaEA({ valor: costo * 100, tipo: 'MV' }) : ea;
+      html += `<section class="tarjeta"><h2>Tu crédito</h2><table class="tabla-indicadores"><tbody>
+        ${numero && !d.cerrada ? `<tr><td>Cuota que sigue</td><td>${numero} de ${d.plazo}</td></tr>` : ''}
+        <tr><td>Te prestaron</td><td>${pesos(d.inicial)}</td></tr>
+        <tr><td>Total a pagar</td><td>${pesos(d.cuota * d.plazo)}</td></tr>
+        <tr><td>Intereses y cargos</td><td>${pesos(d.cuota * d.plazo - d.inicial)}</td></tr>
+        ${d.primera ? `<tr><td>Última cuota</td><td>${esc(M.fechaLarga(M.fechaCuota(d.primera, d.plazo)))}</td></tr>` : ''}
+        ${costo != null ? `<tr><td>Costo total</td><td>${M.decimal(eaCosto * 100, 1)}% E.A.</td></tr>` : ''}</tbody></table>
+        ${d.estimados.length ? `<p class="nota">Calculado por Platica con lo que sabías: ${esc(d.estimados.map((x) => ({ tasa: 'la tasa', saldo: 'el saldo', cuota: 'la cuota', plazo: 'el número de cuotas', inicial: 'lo que te prestaron' }[x])).join(', '))}.</p>` : ''}
+        ${eaCosto * 100 > estado.ajustes.usura.ea + 0.005 ? `<div class="banner critico mt">${icono('alerta')}<div><strong>Cuesta más que la tasa de usura</strong><p>El costo total equivale a ${M.decimal(eaCosto * 100, 1)}% E.A. y la usura de consumo es ${M.decimal(estado.ajustes.usura.ea, 2)}% E.A. Puede incluir seguros, fianzas o comisiones además del interés: pide a la entidad el detalle. Si la tasa de interés sola supera la usura, puedes quejarte ante la Superintendencia Financiera.</p></div></div>` : ''}</section>`;
+    }
     if (!d.cerrada && d.saldo > 0) {
       html += `<section class="tarjeta"><h2>Cuándo terminas de pagar</h2>`;
       if (!isFinite(p.meses)) {
         html += `<div class="banner critico">${icono('alerta')}<div><strong>Con ${p.cuota ? `una cuota de ${pesos(p.cuota)}` : 'esta cuota'} la deuda no baja</strong><p>Los intereses del mes (${pesos(d.saldo * p.i)}) se comen todo el pago. Necesitas abonar más para empezar a bajar el saldo.</p></div></div>`;
       } else {
-        html += `<p class="texto">Con ${p.estimada ? 'una cuota estimada de' : 'la cuota de'} ${pesos(p.cuota)} terminas en <strong>${plural(p.meses, 'mes', 'meses')}</strong> (${esc(M.mesSolo(p.fin))} de ${p.fin.slice(0, 4)}) y pagas unos <strong>${pesos(p.intereses)}</strong> en intereses.</p>`;
+        html += `<p class="texto">Con ${p.estimada ? 'una cuota estimada de' : 'la cuota de'} ${pesos(p.cuota)} terminas en <strong>${plural(p.meses, 'mes', 'meses')}</strong> (${esc(M.mesSolo(p.fin))} de ${p.fin.slice(0, 4)}) y pagas unos <strong>${pesos(unos(p.intereses))}</strong> en intereses.</p>`;
       }
       if (!d.tasa.valor && d.tipo !== 'personal') html += '<p class="nota">Agrega la tasa de interés para que el cálculo de intereses sea real.</p>';
       html += `<label class="campo mt"><span>¿Y si abonas algo extra cada mes?</span><input id="dd-extra" class="entrada monto" inputmode="numeric" placeholder="$0" value="${v.extra ? esc(pesos(v.extra)) : ''}"></label>
@@ -1407,7 +1814,7 @@
         }
         const q = M.proyeccionDeuda(d, v.extra);
         caja.innerHTML = !isFinite(q.meses) ? '<p class="texto texto-critico">Aun así la deuda no baja: los intereses son mayores que el pago.</p>'
-          : `<div class="resultado"><span class="grande">${plural(q.meses, 'mes', 'meses')}</span><span class="sub">Terminas en ${esc(M.mesSolo(q.fin))} de ${q.fin.slice(0, 4)}${isFinite(p.meses) ? `, ${plural(p.meses - q.meses, 'mes', 'meses')} antes, y te ahorras ${pesos(p.intereses - q.intereses)} en intereses` : ''}.</span></div>`;
+          : `<div class="resultado"><span class="grande">${plural(q.meses, 'mes', 'meses')}</span><span class="sub">Terminas en ${esc(M.mesSolo(q.fin))} de ${q.fin.slice(0, 4)}${isFinite(p.meses) ? `, ${plural(p.meses - q.meses, 'mes', 'meses')} antes, y te ahorras unos ${pesos(unos(p.intereses - q.intereses))} en intereses` : ''}.</span></div>`;
       };
       extra.addEventListener('input', calcular);
       calcular();
@@ -1510,7 +1917,7 @@
           pintar();
         });
       }
-      raiz.addEventListener('click', (ev) => {
+      $('#q-resultado', raiz).addEventListener('click', (ev) => {
         if (ev.target.closest('[data-ver-tabla]')) {
           b.todo = !b.todo;
           pintar();
@@ -1809,6 +2216,12 @@
         <p>Agrégalos para saber cuánto te quedó y qué parte se fue en gastos.</p>
         <div class="botones"><button type="button" class="boton primario pequeno" data-accion="nuevo-ingreso" data-mes="${v.mes}">${icono('suma')}Agregar ingreso</button></div></div></div>`;
     }
+    html += htmlFlujo(r) + htmlDeudasDelMes(r, v.mes);
+    const fijosMes = M.pagosDelMes(estado, v.mes).filter((x) => x.clase === 'fijo');
+    if (fijosMes.length) {
+      html += `<section class="tarjeta"><div class="cabecera-tarjeta"><h2>Pagos fijos</h2><span class="sub">${pesos(M.suma(fijosMes.filter((x) => x.estado === 'pagado'), 'monto'))} de ${pesos(M.suma(fijosMes, 'monto'))}</span></div>
+        <div class="lista">${fijosMes.map((x) => filaPagoMes(x, r.esActual)).join('')}</div></section>`;
+    }
     if (!r.cantidad) return { titulo: `Resumen de ${M.mesSolo(v.mes)}`, html: html + '<div class="vacio"><p>No hay gastos registrados en este mes.</p></div>' };
     html += `<section class="tarjeta"><h2>Por categoría</h2><div class="tabla-scroll"><table class="tabla"><thead><tr><th>Categoría</th><th>Gasto</th><th>%</th><th>vs. mes anterior</th></tr></thead><tbody>
       ${r.porCategoria.map((x) => {
@@ -1827,12 +2240,41 @@
       <tr><td>Gasto promedio por día</td><td>${pesos(r.total / (r.dia || r.dias))}</td></tr>
       <tr><td>Día que más gastaste</td><td>${r.diaMayor.dia ? `${esc(M.fechaCorta(`${v.mes}-${String(r.diaMayor.dia).padStart(2, '0')}`))} · ${pesos(r.diaMayor.total)}` : '—'}</td></tr>
       <tr><td>Gastos hormiga (${pesos(M.PAGO_GRANDE_HORMIGA)} o menos)</td><td>${r.hormiga.cantidad} · ${pesos(r.hormiga.total)}</td></tr>
-      <tr><td>Abonos a deudas</td><td>${pesos(r.abonosDeuda)}</td></tr>
       <tr><td>Pagado con tarjeta de crédito</td><td>${pesos(r.conCredito)}</td></tr></tbody></table></section>
       <section class="tarjeta"><h2>Recomendaciones</h2>${M.recomendacionesMes(estado, v.mes).map(recoHtml).join('')}</section>
       ${ANDROID ? `<button type="button" class="boton borde ancho" data-accion="compartir-resumen" data-mes="${v.mes}">${icono('compartir')}Compartir resumen</button>` : ''}`;
     return { titulo: `Resumen de ${M.mesSolo(v.mes)}`, html };
   };
+
+  // Todo lo que entró y salió en el mes, en un solo lugar: gastos del día a día, pagos fijos y deudas.
+  function htmlFlujo(r) {
+    const fila = (nombre, valor, clase = '') => `<div class="${clase}"><span>${nombre}</span><strong>${valor}</strong></div>`;
+    return `<section class="tarjeta"><h2>Así se movió tu plata</h2><div class="flujo">
+      ${fila('Ingresos', `<span class="texto-bien">+${pesos(r.ingresos)}</span>`)}
+      ${fila('Gastos del día a día', `−${pesos(r.flujo.diaADia)}`)}
+      ${r.flujo.fijos ? fila('Pagos fijos', `−${pesos(r.flujo.fijos)}`) : ''}
+      ${r.flujo.deudas ? fila('Cuotas y abonos a deudas', `−${pesos(r.flujo.deudas)}`) : ''}
+      ${fila(r.disponible >= 0 ? (r.esActual ? 'Te queda por ahora' : 'Te quedó') : (r.esActual ? 'Te pasaste por' : 'Te faltaron'),
+        `<span class="${r.disponible < 0 ? 'texto-critico' : ''}">${pesos(Math.abs(r.disponible))}</span>`, 'total')}</div>
+      ${r.flujo.tarjeta ? `<p class="nota">Además pagaste ${pesos(r.flujo.tarjeta)} a tus tarjetas por compras que ya estaban en tus gastos: no se cuentan otra vez.</p>` : ''}
+      ${r.esActual && r.pendientes ? `<p class="nota">Faltan ${pesos(r.pendientes)} en cuotas y pagos fijos de este mes.</p>` : ''}</section>`;
+  }
+  function htmlDeudasDelMes(r, mes) {
+    const rd = M.resumenDeudas(estado, mes);
+    if (!rd.pagos.length && !rd.cuotas.length && !rd.saldoInicio && !rd.saldoFin) return '';
+    const cambio = rd.saldoFin - rd.saldoInicio;
+    return `<section class="tarjeta"><h2>Tus deudas en ${esc(M.mesSolo(mes))}</h2>
+      <div class="cifras"><div class="cifra"><span>Pagaste</span><strong>${cifra(rd.total)}</strong><small>${plural(rd.pagos.length, 'pago', 'pagos')}</small></div>
+      <div class="cifra"><span>A capital</span><strong>${cifra(rd.capital)}</strong><small>baja la deuda</small></div>
+      <div class="cifra"><span>Intereses</span><strong>${cifra(rd.intereses)}</strong><small>y cargos</small></div></div>
+      ${rd.sinDetalle ? `<p class="nota">${pesos(rd.sinDetalle)} se registraron en Deudas sin elegir la deuda: no se sabe cuánto fue a capital.</p>` : ''}
+      ${rd.saldoInicio || rd.saldoFin ? `<div class="flujo mt"><div><span>Deuda total al empezar el mes</span><strong>${pesos(rd.saldoInicio)}</strong></div>
+        <div class="total"><span>${r.esActual ? 'Deuda total hoy' : 'Al terminar el mes'}</span><strong>${pesos(rd.saldoFin)}</strong></div></div>
+        <p class="nota ${cambio < 0 ? 'texto-bien' : cambio > 0 ? 'texto-aviso' : ''}">${cambio < 0 ? `Bajó ${pesos(-cambio)}.` : cambio > 0
+          ? `Subió ${pesos(cambio)}${rd.nuevas.length ? `: incluye ${esc(rd.nuevas.join(', '))}, ${rd.nuevas.length === 1 ? 'que empezó' : 'que empezaron'} este mes` : ''}.` : 'No cambió.'}</p>` : ''}
+      ${rd.cuotas.length ? `<h3>Cuotas del mes</h3><div class="lista">${rd.cuotas.map((x) => filaPagoMes(x, r.esActual)).join('')}</div>` : ''}
+      ${rd.terminadas.length ? `<div class="banner bien mt">${icono('trofeo')}<div><p>Terminaste de pagar: ${esc(rd.terminadas.join(', '))}.</p></div></div>` : ''}</section>`;
+  }
 
   // ----- aprende -----
   const ARTICULOS = {
@@ -1958,6 +2400,7 @@
         <label class="interruptor"><span>Cuotas por vencer<small>Dos días antes y el día del pago, para cada deuda con día de pago</small></span><input type="checkbox" data-ajuste="recordatorioCuotas"${a.recordatorioCuotas ? ' checked' : ''}></label>
         <label class="interruptor"><span>Registrar los gastos del día<small>Un aviso diario a la hora que elijas</small></span><input type="checkbox" data-ajuste="recordatorioDiario"${a.recordatorioDiario ? ' checked' : ''}></label>
         <label class="interruptor"><span>Resumen del mes<small>El día 1 de cada mes</small></span><input type="checkbox" data-ajuste="resumenMensual"${a.resumenMensual ? ' checked' : ''}></label>
+        <label class="interruptor"><span>Pagos fijos<small>El día del pago; si se cobra solo, la víspera</small></span><input type="checkbox" data-ajuste="recordatorioFijos"${a.recordatorioFijos ? ' checked' : ''}></label>
         ${M.esFijo(estado.perfil, M.mesActual()) ? '' : `<label class="interruptor"><span>Anotar tus ingresos<small>Tus ingresos son variables: te recuerdo registrarlos cada mes</small></span><input type="checkbox" data-ajuste="recordatorioIngresos"${a.recordatorioIngresos ? ' checked' : ''}></label>`}
       </section>
       <label class="campo"${a.recordatorioDiario ? '' : ' hidden'} id="rc-hora-campo"><span>Hora del aviso diario</span><input id="rc-hora" type="time" class="entrada" value="${esc(a.horaDiario)}"></label>
@@ -2232,7 +2675,55 @@
     },
     'pagar-deuda': (el) => {
       const d = deudaPorId(el.dataset.id);
-      mostrar({ tipo: 'gasto', categoria: 'deudas', deuda: d.id, monto: M.cuotaUsada(d).cuota });
+      mostrar({ tipo: 'gasto', categoria: 'deudas', deuda: d.id, monto: M.cuotaUsada(d).cuota, fecha: el.dataset.fecha || M.hoy() });
+    },
+    'ver-fijos': () => {
+      filtro.modo = 'fijos';
+      irA('movimientos');
+    },
+    'nuevo-fijo': () => mostrar({ tipo: 'fijoForm' }),
+    'ver-fijo': (el) => mostrar({ tipo: 'fijo', id: el.dataset.id }),
+    'editar-fijo': (el) => mostrar({ tipo: 'fijoForm', id: el.dataset.id }),
+    // Pagar un pago fijo: un gasto ya lleno con su valor, su categoría y su medio de pago.
+    'pagar-fijo': (el) => {
+      const f = estado.fijos.find((x) => x.id === el.dataset.id);
+      if (!f) return;
+      const mes = el.dataset.mes || M.mesActual();
+      mostrar({ tipo: 'gasto', fijo: f.id, monto: f.monto, categoria: f.categoria, nota: f.nombre, medio: f.medio,
+        fecha: mes === M.mesActual() ? M.hoy() : M.fechaFijo(f, mes) });
+    },
+    'cancelar-fijo': async (el) => {
+      const f = estado.fijos.find((x) => x.id === el.dataset.id);
+      const mes = M.mesActual();
+      const siguiente = M.sumarMeses(mes, 1);
+      const pagadoEsteMes = !!M.pagoDeFijo(estado, f, mes);
+      const opcion = await elegir({ titulo: `Cancelar ${f.nombre}`, texto: 'Los pagos que ya registraste se quedan en tu historial y en tus resúmenes.',
+        opciones: [{ valor: 'este', texto: pagadoEsteMes ? `Ya no lo pago desde ${M.mesSolo(siguiente)} (${M.mesSolo(mes)} ya está pagado)` : `Ya no lo pago desde ${M.mesSolo(mes)}`, clase: 'primario' },
+          ...(pagadoEsteMes ? [] : [{ valor: 'proximo', texto: `Pago ${M.mesSolo(mes)} y lo cancelo desde ${M.mesSolo(siguiente)}` }])] });
+      if (!opcion) return;
+      f.fin = opcion === 'este' && !pagadoEsteMes ? M.sumarMeses(mes, -1) : mes;
+      guardar();
+      render(true);
+      avisar(`${f.nombre} cancelado: desde ${M.mesSolo(M.sumarMeses(f.fin, 1))} ya no se cuenta.`);
+    },
+    'reactivar-fijo': (el) => {
+      const f = estado.fijos.find((x) => x.id === el.dataset.id);
+      const mes = M.mesActual();
+      // Los meses en que estuvo cancelado no se cobran.
+      for (let m = M.sumarMeses(f.fin, 1); m < mes; m = M.sumarMeses(m, 1)) if (m >= f.desde && !f.omitidos.includes(m)) f.omitidos.push(m);
+      f.fin = '';
+      guardar();
+      render(true);
+      avisar(`${f.nombre} vuelve a contarse desde ${M.mesSolo(mes)}.`);
+    },
+    'eliminar-fijo': async (el) => {
+      const f = estado.fijos.find((x) => x.id === el.dataset.id);
+      if (!(await confirmar({ titulo: `Eliminar ${f.nombre}`, texto: 'Los pagos que ya registraste se quedan en tus gastos. Si solo dejaste de pagarlo, mejor cancélalo: así se conserva el historial.', si: 'Eliminar', peligro: true }))) return;
+      for (const g of estado.gastos) if (g.fijo === f.id) g.fijo = null;
+      estado.fijos = estado.fijos.filter((x) => x !== f);
+      guardar();
+      cerrarVista();
+      avisar('Pago fijo eliminado');
     },
     'nueva-categoria': () => mostrar({ tipo: 'categoria' }),
     'editar-categoria': (el) => mostrar({ tipo: 'categoria', id: el.dataset.id }),
@@ -2465,6 +2956,7 @@
         } catch (e) { /* sin cambios */ }
       }
       revisarCambioDeMes();
+      if (aplicarCobrosAutomaticos()) render();
       sincronizarRecordatorios();
       if (cambio && vistaActual() && vistaActual().tipo === 'recordatorios') render(true);
     },
@@ -2510,6 +3002,7 @@
 
   // ---------- arranque ----------
   if (!estado.perfil.configurado) pila = [{ tipo: 'bienvenida', clave: ++claves }];
+  aplicarCobrosAutomaticos();
   render();
   revisarCambioDeMes();
   sincronizarRecordatorios();

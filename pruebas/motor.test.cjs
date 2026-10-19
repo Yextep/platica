@@ -305,3 +305,170 @@ test('exporta un CSV seguro para Excel', () => {
   assert.match(csv, /"'=HYPERLINK\(""x""\)"/);
   assert.match(csv, /"gafas; lentes"/);
 });
+
+// ---------- créditos de cuota fija ----------
+test('completa un crédito con monto, cuota y número de cuotas (el crédito móvil)', () => {
+  const primera = M.primeraCuotaDe('2026-10-08');
+  assert.equal(primera, '2026-11-08');
+  const r = M.completarCredito({ monto: 2000000, cuota: 220000, plazo: 12, tasa: { valor: 0, tipo: 'EA' }, primera }, '2026-10-19');
+  assert.ok(r.completo);
+  assert.deepEqual(r.calculados, ['tasa', 'pagadas', 'saldo']);
+  assert.equal(M.decimal(r.i * 100, 2), '4,55');
+  assert.equal(M.decimal(M.tasaEA({ valor: r.i * 100, tipo: 'MV' }) * 100, 1), '70,6');
+  assert.deepEqual([r.total, r.intereses, r.pagadas, r.saldo, r.restantes, r.proxima, r.fin], [2640000, 640000, 0, 2000000, 12, '2026-11-08', '2027-10-08']);
+  // La tasa reproduce la cuota.
+  assert.ok(Math.abs(M.cuotaFija(2000000, r.i, 12) - 220000) < 0.01);
+  // En enero ya van tres cuotas y el saldo de capital bajó.
+  const enero = M.completarCredito({ monto: 2000000, cuota: 220000, plazo: 12, tasa: { valor: 0 }, primera }, '2027-01-20');
+  assert.equal(enero.pagadas, 3);
+  assert.equal(enero.saldo, Math.round(M.saldoTras(2000000, r.i, 220000, 3)));
+  // Si la persona sabe cuántas cuotas lleva y su saldo, se usan esos.
+  const propio = M.completarCredito({ monto: 2000000, cuota: 220000, plazo: 12, primera, pagadas: 5, saldo: 1300000 }, '2026-10-19');
+  assert.deepEqual([propio.pagadas, propio.saldo, propio.calculados.includes('saldo')], [5, 1300000, false]);
+});
+
+test('calcula la cuota, el plazo o el monto que falte', () => {
+  const cuota = M.completarCredito({ monto: 5000000, plazo: 36, tasa: { valor: 1.9, tipo: 'MV' } }, '2026-10-19');
+  assert.equal(cuota.cuota, Math.round(M.cuotaFija(5000000, 0.019, 36)));
+  assert.ok(cuota.calculados.includes('cuota'));
+  const plazo = M.completarCredito({ monto: 5000000, cuota: cuota.cuota, tasa: { valor: 1.9, tipo: 'MV' } }, '2026-10-19');
+  assert.equal(plazo.plazo, 36);
+  const monto = M.completarCredito({ cuota: 253934, plazo: 60, tasa: { valor: 1.5, tipo: 'MV' } }, '2026-10-19');
+  assert.ok(Math.abs(monto.monto - 10000000) < 50);
+  // Con dos datos no alcanza.
+  assert.deepEqual([M.completarCredito({ monto: 1000000, cuota: 100000 }, '2026-10-19').completo, M.completarCredito({ monto: 1000000, cuota: 100000 }, '2026-10-19').faltan], [false, 1]);
+});
+
+test('con los cuatro datos, la cuota de más se muestra como seguros o cargos', () => {
+  const r = M.completarCredito({ monto: 2000000, cuota: 220000, plazo: 12, tasa: { valor: 2, tipo: 'MV' }, primera: '2026-11-08' }, '2026-10-19');
+  assert.equal(r.cargos, Math.round(220000 - M.cuotaFija(2000000, 0.02, 12)));
+  assert.ok(r.iCosto > 0.045 && r.iCosto < 0.046);
+  // El saldo se calcula con la cuota sin cargos.
+  const despues = M.completarCredito({ monto: 2000000, cuota: 220000, plazo: 12, tasa: { valor: 2, tipo: 'MV' }, primera: '2026-11-08' }, '2027-01-20');
+  assert.equal(despues.saldo, Math.round(M.saldoTras(2000000, 0.02, M.cuotaFija(2000000, 0.02, 12), 3)));
+});
+
+test('avisa cuando los datos del crédito no cuadran', () => {
+  const corta = M.completarCredito({ monto: 3000000, cuota: 200000, plazo: 12 }, '2026-10-19');
+  assert.equal(corta.completo, false);
+  assert.match(corta.avisos[0].texto, /no alcanza a cubrir lo que te prestaron/);
+  const nunca = M.completarCredito({ monto: 5000000, cuota: 50000, tasa: { valor: 2, tipo: 'MV' } }, '2026-10-19');
+  assert.equal(nunca.completo, false);
+  assert.match(nunca.avisos[0].texto, /no alcanzas a cubrir los intereses/);
+});
+
+test('las fechas de las cuotas respetan los meses cortos', () => {
+  assert.equal(M.fechaCuota('2027-01-31', 2), '2027-02-28');
+  assert.equal(M.fechaCuota('2027-01-31', 3), '2027-03-31');
+  assert.equal(M.cuotasVencidas('2026-11-08', 12, '2026-11-07'), 0);
+  assert.equal(M.cuotasVencidas('2026-11-08', 12, '2026-11-08'), 1);
+  assert.equal(M.cuotasVencidas('2026-11-08', 12, '2030-01-01'), 12);
+  const d = { diaPago: 8, primera: '2026-11-08', plazo: 12, cerrada: false };
+  assert.equal(M.proximoPago(d, '2026-10-19'), '2026-11-08');
+  assert.equal(M.proximoPago(d, '2026-11-09'), '2026-12-08');
+  assert.equal(M.proximoPago(d, '2027-10-09'), '');
+});
+
+// ---------- pagos fijos y pagos del mes ----------
+function conFijos(cambios = {}) {
+  return estadoCon({
+    fijos: [
+      { id: 'cel', nombre: 'Plan del celular', monto: 55000, categoria: 'servicios', dia: 5, desde: '2026-09' },
+      { id: 'stream', nombre: 'Streaming', monto: 26900, categoria: 'personales', dia: 25, automatico: true, desde: '2026-09' },
+      { id: 'gym', nombre: 'Gimnasio', monto: 90000, categoria: 'personales', dia: 1, desde: '2026-08', fin: '2026-09' },
+    ],
+    ...cambios,
+  });
+}
+
+test('normaliza los pagos fijos y sus enlaces', () => {
+  const e = M.normalizarEstado({
+    fijos: [{ id: 'a', nombre: 'Plan', monto: 50000, dia: 40, desde: '2026-10', fin: '2025-01', omitidos: ['2026-10', 'malo', '2026-10'] }, { id: 'b', monto: 0, desde: '2026-10' }],
+    deudas: [{ id: 'tc', tipo: 'tarjeta', saldo: 10, estimados: ['tasa', 'nada'] }],
+    gastos: [{ id: 'g1', fecha: '2026-10-05', monto: 50000, categoria: 'servicios', fijo: 'a' }, { id: 'g2', fecha: '2026-10-06', monto: 1, categoria: 'deudas', fijo: 'a', deuda: { id: 'tc', capital: 1, sinGasto: true } },
+      { id: 'g3', fecha: '2026-10-07', monto: 1, categoria: 'comida', fijo: 'x' }],
+  });
+  assert.equal(e.fijos.length, 1);
+  assert.deepEqual([e.fijos[0].dia, e.fijos[0].fin, e.fijos[0].omitidos, e.fijos[0].automatico], [1, '', ['2026-10'], false]);
+  assert.deepEqual(e.gastos.map((g) => g.fijo), ['a', null, null]);
+  assert.equal(e.gastos[1].deuda.sinGasto, true);
+  assert.deepEqual(e.deudas[0].estimados, ['tasa']);
+});
+
+test('los pagos del mes juntan cuotas y pagos fijos con su estado', () => {
+  const e = conFijos({
+    deudas: [{ id: 'tc', nombre: 'Tarjeta', tipo: 'tarjeta', inicial: 1000000, saldo: 500000, cuota: 80000, diaPago: 25, creada: '2026-09-01' },
+      { id: 'mov', nombre: 'Crédito móvil', tipo: 'libre_inversion', inicial: 2000000, saldo: 2000000, cuota: 220000, plazo: 12, diaPago: 8, primera: '2026-11-08', creada: '2026-10-19' }],
+    gastos: [{ id: 'p1', fecha: '2026-10-05', monto: 55000, categoria: 'servicios', fijo: 'cel' }],
+  });
+  const oct = M.pagosDelMes(e, '2026-10', AHORA);
+  assert.deepEqual(oct.map((x) => `${x.nombre}:${x.estado}`), ['Plan del celular:pagado', 'Streaming:pendiente', 'Tarjeta:pendiente']);
+  // El crédito móvil empieza en noviembre; el gimnasio se canceló en septiembre.
+  const nov = M.pagosDelMes(e, '2026-11', AHORA).map((x) => x.nombre);
+  assert.ok(nov.includes('Crédito móvil') && !nov.includes('Gimnasio'));
+  // En meses pasados, lo que no se pagó queda «vencido» (sin registrar).
+  const sep = M.pagosDelMes(e, '2026-09', AHORA);
+  assert.ok(sep.every((x) => x.estado === 'vencido') && sep.some((x) => x.nombre === 'Gimnasio') && sep.some((x) => x.nombre === 'Tarjeta'));
+  // Una deuda registrada hoy no tiene cuotas vencidas de antes de registrarla.
+  const nueva = estadoCon({ deudas: [{ id: 'n', nombre: 'Nueva', tipo: 'libre_inversion', saldo: 900000, cuota: 100000, diaPago: 10, primera: '2026-01-10', plazo: 24, creada: '2026-10-19' }] });
+  assert.equal(M.pagosDelMes(nueva, '2026-10', AHORA).length, 0);
+  assert.equal(M.pagosDelMes(nueva, '2026-11', AHORA)[0].fecha, '2026-11-10');
+});
+
+test('los pagos fijos que se cobran solos se registran el día del cobro, una sola vez', () => {
+  const e = conFijos();
+  const nuevos = M.cobrosAutomaticos(e, new Date(2026, 9, 26, 9));
+  // Septiembre y octubre del streaming (el 25 ya pasó); el plan del celular se paga a mano.
+  assert.deepEqual(nuevos.map((g) => `${g.fijo}:${g.fecha}:${g.monto}:${g.categoria}`), ['stream:2026-09-25:26900:personales', 'stream:2026-10-25:26900:personales']);
+  e.gastos.push(...nuevos);
+  assert.equal(M.cobrosAutomaticos(e, new Date(2026, 9, 26, 9)).length, 0);
+  // Antes del 25 no se cobra el de octubre; un mes omitido no se vuelve a cobrar.
+  const otra = conFijos();
+  otra.fijos[1].omitidos = ['2026-09'];
+  assert.equal(M.cobrosAutomaticos(otra, AHORA).length, 0);
+});
+
+test('el resumen del mes no cuenta dos veces el pago de una tarjeta y proyecta lo que falta pagar', () => {
+  const e = conFijos({
+    deudas: [{ id: 'tc', nombre: 'Tarjeta', tipo: 'tarjeta', inicial: 1000000, saldo: 300000, cuota: 80000, diaPago: 25, creada: '2026-09-01',
+      historial: [{ fecha: '2026-09-01', saldo: 500000 }, { fecha: '2026-10-10', saldo: 300000 }] }],
+    gastos: [
+      { id: 'c', fecha: '2026-10-02', monto: 100000, categoria: 'personales', medio: 'credito' },
+      { id: 'pt', fecha: '2026-10-10', monto: 200000, categoria: 'deudas', deuda: { id: 'tc', capital: 200000, interes: 0, sinGasto: true } },
+      { id: 'f', fecha: '2026-10-05', monto: 55000, categoria: 'servicios', fijo: 'cel' },
+      { id: 'cuota', fecha: '2026-10-12', monto: 80000, categoria: 'deudas', deuda: { id: 'tc', capital: 70000, interes: 10000 } },
+    ],
+  });
+  const r = M.resumenMes(e, '2026-10', AHORA);
+  assert.equal(r.total, 235000);
+  assert.deepEqual(r.flujo, { diaADia: 100000, fijos: 55000, deudas: 80000, tarjeta: 200000 });
+  assert.equal(r.disponible, 2000000 - 235000);
+  // Falta el streaming (26.900); la cuota de la tarjeta ya se pagó el 12.
+  assert.equal(r.pendientes, 26900);
+  assert.equal(r.proyeccion, Math.round(135000 + 100000 / 19 * 31 + 26900));
+  const rd = M.resumenDeudas(e, '2026-10', AHORA);
+  assert.deepEqual([rd.total, rd.capital, rd.intereses, rd.saldoInicio, rd.saldoFin], [280000, 270000, 10000, 500000, 300000]);
+  assert.equal(rd.cuotas[0].estado, 'pagado');
+});
+
+test('recuerda los pagos fijos: la víspera si se cobra solo, el día si se paga a mano', () => {
+  const e = conFijos();
+  const ids = M.recordatorios(e, AHORA).map((r) => r.id);
+  assert.ok(ids.includes('fijo-stream-2026-10') && ids.includes('fijo-cel-2026-11') && !ids.includes('fijo-cel-2026-10') && !ids.some((id) => id.startsWith('fijo-gym')));
+  const vispera = M.recordatorios(e, AHORA).find((r) => r.id === 'fijo-stream-2026-10');
+  assert.equal(new Date(vispera.cuando).getDate(), 24);
+  e.gastos.push({ id: 'pagado', fecha: '2026-10-19', monto: 26900, categoria: 'personales', fijo: 'stream', deuda: null, nota: '', medio: '' });
+  assert.ok(!M.recordatorios(e, AHORA).some((r) => r.id === 'fijo-stream-2026-10'));
+});
+
+test('el CSV dice qué gastos son pagos fijos y qué pagos de tarjeta no suman', () => {
+  const e = conFijos({
+    deudas: [{ id: 'tc', nombre: 'Visa', tipo: 'tarjeta', saldo: 1 }],
+    gastos: [{ id: 'f', fecha: '2026-10-05', monto: 55000, categoria: 'servicios', fijo: 'cel' },
+      { id: 't', fecha: '2026-10-06', monto: 9000, categoria: 'deudas', deuda: { id: 'tc', capital: 9000, sinGasto: true } }],
+  });
+  const csv = M.gastosCSV(e);
+  assert.match(csv, /Fecha;Tipo;Categoría;Monto;Medio de pago;Nota;Deuda;Pago fijo/);
+  assert.match(csv, /2026-10-05;Gasto;Servicios;55000;;;;Plan del celular/);
+  assert.match(csv, /2026-10-06;Pago de tarjeta \(compras ya registradas\);Deudas;9000;;;Visa;/);
+});
