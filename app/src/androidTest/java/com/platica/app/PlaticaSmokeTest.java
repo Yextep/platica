@@ -109,12 +109,24 @@ public class PlaticaSmokeTest {
         exigir(escenario, "Platica.vista() === 'inicio' && Platica.estado().perfil.periodos[0].monto === 2000000");
     }
 
-    // Toca un elemento de la página como lo haría un dedo: así Android abre el teclado de verdad.
-    private void tocar(ActivityScenario<MainActivity> escenario, String selector) throws Exception {
+    private JSONObject centro(ActivityScenario<MainActivity> escenario, String selector, boolean desplazar) throws Exception {
         String valor = evaluar(escenario, "(() => { const e = document.querySelector(" + JSONObject.quote(selector) + ");"
-                + " e.scrollIntoView({block: 'center'}); const r = e.getBoundingClientRect();"
+                + (desplazar ? " e.scrollIntoView({block: 'center'});" : "") + " const r = e.getBoundingClientRect();"
                 + " return JSON.stringify({x: r.left + r.width / 2, y: r.top + r.height / 2, d: window.devicePixelRatio}); })()");
-        JSONObject punto = new JSONObject(new JSONArray("[" + valor + "]").getString(0));
+        return new JSONObject(new JSONArray("[" + valor + "]").getString(0));
+    }
+
+    // Toca un elemento de la página como lo haría un dedo: así Android abre el teclado de verdad.
+    // Al abrirse o cerrarse el teclado la página se acomoda; se toca solo cuando el elemento ya no se mueve.
+    private void tocar(ActivityScenario<MainActivity> escenario, String selector) throws Exception {
+        JSONObject punto = centro(escenario, selector, true);
+        for (int intento = 0; intento < 12; intento++) {
+            Thread.sleep(250);
+            JSONObject otra = centro(escenario, selector, false);
+            boolean quieto = Math.abs(otra.getDouble("x") - punto.getDouble("x")) < 1 && Math.abs(otra.getDouble("y") - punto.getDouble("y")) < 1;
+            punto = otra;
+            if (quieto) break;
+        }
         int[] origen = new int[2];
         escenario.onActivity(actividad -> actividad.findViewById(R.id.navegador).getLocationOnScreen(origen));
         long x = Math.round(origen[0] + punto.getDouble("x") * punto.getDouble("d"));
@@ -182,6 +194,10 @@ public class PlaticaSmokeTest {
             assertEquals("\"g-monto\"", evaluar(escenario, "document.activeElement.id"));
             tocar(escenario, "[data-cat=comida]");
             exigir(escenario, "document.querySelector('[data-cat=comida]').getAttribute('aria-pressed') === 'true'");
+            // Se cierra el teclado y se espera a que la página termine de acomodarse antes de tocar «Guardar».
+            evaluar(escenario, "document.activeElement && document.activeElement.blur()");
+            for (int i = 0; i < 40 && tecladoVisible(escenario); i++) Thread.sleep(250);
+            exigir(escenario, "!document.body.classList.contains('teclado')");
             tocar(escenario, "#form-gasto button[type=submit]");
             exigir(escenario, "Platica.vista() === 'inicio' && Platica.estado().gastos.length === 1 && Platica.estado().gastos[0].monto === 45000");
         }
